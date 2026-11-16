@@ -20,6 +20,12 @@ from . import outpaint as OP
 from . import processing as P
 
 APP_NAME = "Numbered - Batch Cooking"
+
+
+def asset_path(name: str) -> Path:
+    """Fichier du dossier assets/, aussi dans l'app construite (PyInstaller)."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return base / "assets" / name
 PREVIEW_MAX = 1400
 PREVIEW_BG = QColor(222, 222, 222)  # fond gris clair derrière les images  # taille max de l'image utilisée pour l'aperçu
 THUMB = 64
@@ -246,7 +252,7 @@ class MaskThread(QThread):
 # Export en tâche de fond
 # --------------------------------------------------------------------------- #
 class AiPreviewThread(QThread):
-    """Calcule l'agrandissement IA de l'aperçu (sans bloquer l'interface)."""
+    """Calcule l'aperçu avec l'IA (fond et/ou agrandissement), sans bloquer l'interface."""
     status = Signal(str)
     done = Signal(object, object)
     failed = Signal(object, str)
@@ -262,17 +268,8 @@ class AiPreviewThread(QThread):
                     f"Téléchargement de l'IA locale (une seule fois) {d * 100 // max(t, 1)} %…"))
             if self.s.bg_enabled and not BG.is_downloaded(self.s.bg_model):
                 BG.download(self.s.bg_model)
-            self.status.emit("Agrandissement IA de l'aperçu en cours…")
-            box = {}
-
-            def ai(img, size, ox, oy):
-                box["out"] = OP.outpaint(img, size, ox, oy,
-                                         "openai" if self.s.pad_fill == "ai_openai" else "local",
-                                         self.s.openai_key, self.s.openai_model, self.s.openai_quality)
-                return box["out"]
-
-            P.process(self.img, self.s, self.mask_fn, None, ai)
-            self.done.emit(self.key, box.get("out"))
+            self.status.emit("IA en cours sur l'aperçu…")
+            self.done.emit(self.key, P.process(self.img, self.s, self.mask_fn))
         except Exception as exc:
             self.failed.emit(self.key, str(exc))
 
@@ -350,6 +347,13 @@ class MainWindow(QMainWindow):
         bar.addStretch()
         bar.addWidget(self.info)
         cl.addLayout(bar)
+        ai_bar = QHBoxLayout()
+        self.ai_preview_btn = QPushButton("Générer l'aperçu IA de cette image")
+        self.ai_preview_btn.clicked.connect(self._start_ai_preview)
+        self.ai_status = QLabel("")
+        ai_bar.addWidget(self.ai_preview_btn)
+        ai_bar.addWidget(self.ai_status, 1)
+        cl.addLayout(ai_bar)
         splitter.addWidget(center)
         splitter.addWidget(self._build_settings_panel())
         splitter.setSizes([280, 760, 360])
@@ -478,11 +482,20 @@ class MainWindow(QMainWindow):
         trim_row.addWidget(self.bg_trim)
         trim_row.addWidget(self.bg_margin)
         f.addRow(trim_row)
+        self.bg_ai_cb = QCheckBox("Créer le nouveau fond avec l'IA (OpenAI)")
+        self.bg_ai_cb.toggled.connect(self._update_bg_ui)
+        f.addRow(self.bg_ai_cb)
+        self.bg_prompt = QLineEdit(self.qsettings.value("bg_prompt", ""))
+        self.bg_prompt.setPlaceholderText("ex. table en marbre blanc, lumière douce de studio")
+        self.bg_prompt.editingFinished.connect(
+            lambda: self.qsettings.setValue("bg_prompt", self.bg_prompt.text()))
+        self.bg_prompt_label = QLabel("Décrire le fond")
+        f.addRow(self.bg_prompt_label, self.bg_prompt)
         self.bg_status = QLabel("")
         self.bg_status.setWordWrap(True)
         f.addRow(self.bg_status)
         self.bg_widgets = [self.bg_model, self.bg_fill, self.bg_color_btn, self.bg_image_btn,
-                           self.bg_feather, self.bg_trim, self.bg_margin]
+                           self.bg_feather, self.bg_trim, self.bg_margin, self.bg_ai_cb, self.bg_prompt]
         v.addWidget(g)
 
         # Changement de ratio avec ajout de fond
@@ -529,27 +542,29 @@ class MainWindow(QMainWindow):
         self.ai_openai_cb.toggled.connect(lambda on: self._on_ai_toggled(self.ai_openai_cb, on))
         f.addRow(self.ai_local_cb)
         f.addRow(self.ai_openai_cb)
+        self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_color_btn, self.pad_blur,
+                            self.ai_local_cb, self.ai_openai_cb]
+        v.addWidget(g)
+
+        # Réglages OpenAI, communs au fond IA et à l'agrandissement IA
+        g = self.sec_openai = Section("IA OpenAI (clé API)")
+        f = QFormLayout(g.body)
+        f.setContentsMargins(8, 4, 4, 10)
         self.openai_key = QLineEdit(self.qsettings.value("openai_key", ""))
         self.openai_key.setEchoMode(QLineEdit.Password)
         self.openai_key.setPlaceholderText("sk-… (platform.openai.com)")
         self.openai_key.editingFinished.connect(
             lambda: self.qsettings.setValue("openai_key", self.openai_key.text().strip()))
-        self.openai_key_label = QLabel("Clé API OpenAI")
-        f.addRow(self.openai_key_label, self.openai_key)
+        self.openai_key.editingFinished.connect(self._update_ai_bar)
+        f.addRow("Clé API", self.openai_key)
         self.openai_quality = QComboBox()
         for label, key in [("Haute", "high"), ("Moyenne (moins chère)", "medium"), ("Basse", "low")]:
             self.openai_quality.addItem(label, key)
-        self.openai_quality_label = QLabel("Qualité OpenAI")
-        f.addRow(self.openai_quality_label, self.openai_quality)
-        self.ai_preview_btn = QPushButton("Générer l'aperçu IA de cette image")
-        self.ai_preview_btn.clicked.connect(self._start_ai_preview)
-        f.addRow(self.ai_preview_btn)
-        self.ai_status = QLabel("")
-        self.ai_status.setWordWrap(True)
-        f.addRow(self.ai_status)
-        self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_color_btn, self.pad_blur,
-                            self.ai_local_cb, self.ai_openai_cb, self.openai_key, self.openai_quality,
-                            self.ai_preview_btn]
+        f.addRow("Qualité", self.openai_quality)
+        note = QLabel("Utilisée par « Créer le nouveau fond avec l'IA » et « Agrandir avec l'IA OpenAI ». "
+                      "Les images concernées sont envoyées à OpenAI (≈ 0,05 à 0,20 € par appel).")
+        note.setWordWrap(True)
+        f.addRow(note)
         v.addWidget(g)
 
         # Redimensionnement
@@ -686,6 +701,8 @@ class MainWindow(QMainWindow):
             bg_feather=self.bg_feather.value(),
             bg_trim=self.bg_trim.isChecked(),
             bg_margin=self.bg_margin.value(),
+            bg_ai=self.bg_ai_cb.isChecked(),
+            bg_prompt=self.bg_prompt.text().strip(),
             pad_enabled=self.pad_enabled.isChecked(),
             pad_ratio=tuple(self.pad_ratio.currentData()),
             pad_fill=("ai_local" if self.ai_local_cb.isChecked() else
@@ -737,8 +754,13 @@ class MainWindow(QMainWindow):
         for w in self.bg_widgets:
             w.setEnabled(on and not err)
         fill = self.bg_fill.currentData()
-        for wdg, vis in [(self.bg_color_btn, fill == "color"), (self.bg_color_label, fill == "color"),
-                         (self.bg_image_btn, fill == "image"), (self.bg_image_label, fill == "image")]:
+        bg_ai = self.bg_ai_cb.isChecked()
+        self.bg_fill.setEnabled(on and not err and not bg_ai)  # l'IA remplace le choix de fond
+        for wdg, vis in [(self.bg_color_btn, fill == "color" and not bg_ai),
+                         (self.bg_color_label, fill == "color" and not bg_ai),
+                         (self.bg_image_btn, fill == "image" and not bg_ai),
+                         (self.bg_image_label, fill == "image" and not bg_ai),
+                         (self.bg_prompt, bg_ai), (self.bg_prompt_label, bg_ai)]:
             wdg.setVisible(vis)
         self.bg_color_btn.setText(self.bg_color.name().upper())
         self.bg_color_btn.setStyleSheet(
@@ -749,6 +771,7 @@ class MainWindow(QMainWindow):
             self.bg_status.setText("Le modèle sera téléchargé au premier usage (une seule fois).")
         else:
             self.bg_status.setText("")
+        self._update_ai_bar()
         self.refresh_preview()
 
     def _choose_bg_color(self):
@@ -807,34 +830,44 @@ class MainWindow(QMainWindow):
                           "quality", "suffix", "keep_metadata", "openai_key")}
         return (str(self.preview_path), repr(sorted(d.items())))
 
-    def _preview_ai_fn(self, s: P.Settings, mask_fn, auto: bool):
-        key = self._ai_key(s)
-        if key in self.ai_cache:
-            out = self.ai_cache[key]
-            return lambda *_a: out  # None après un échec : bords prolongés
-        if auto and s.bg_enabled and mask_fn is None:
-            auto = False  # on attend d'abord le détourage
-        if auto:
-            self._start_ai_preview(s=s, mask_fn=mask_fn)
-        return lambda *_a: None
+    def _ai_active(self, s: P.Settings) -> bool:
+        return (s.bg_enabled and s.bg_ai) or (s.pad_enabled and s.pad_fill in ("ai_local", "ai_openai"))
 
-    def _start_ai_preview(self, *_, s: P.Settings = None, mask_fn=None):
+    def _uses_openai(self, s: P.Settings) -> bool:
+        return (s.bg_enabled and s.bg_ai) or (s.pad_enabled and s.pad_fill == "ai_openai")
+
+    def _update_ai_bar(self):
+        if not hasattr(self, "ai_preview_btn") or not hasattr(self, "openai_key"):
+            return
+        s = self.current_settings()
+        active = self._ai_active(s)
+        self.ai_preview_btn.setVisible(active)
+        self.ai_status.setVisible(active)
+        if active and self.ai_pending is None:
+            msg = "L'IA est appliquée à l'export ; aperçu IA sur demande."
+            if self._uses_openai(s) and not s.openai_key:
+                msg = "Collez votre clé dans le volet « IA OpenAI (clé API) »."
+            self.ai_status.setText(msg)
+
+    def _start_ai_preview(self, *_):
         if self.preview_src is None:
             return
-        if s is None:
-            s = P.Settings(**{**self.current_settings().__dict__, "resize_mode": "none"})
-            if s.bg_enabled:
-                mask_fn = self._preview_mask_fn(s)
-                if mask_fn is None:
-                    self.ai_status.setText("Détourage en cours, réessayez dans un instant.")
-                    return
-        if s.pad_fill == "ai_openai" and not s.openai_key:
-            self.ai_status.setText("Collez d'abord votre clé API OpenAI.")
+        s = P.Settings(**{**self.current_settings().__dict__, "resize_mode": "none"})
+        mask_fn = None
+        if s.bg_enabled:
+            mask_fn = self._preview_mask_fn(s)
+            if mask_fn is None:
+                self.ai_status.setText("Détourage en cours, réessayez dans un instant.")
+                return
+        if self._uses_openai(s) and not s.openai_key:
+            self.ai_status.setText("Collez d'abord votre clé dans le volet « IA OpenAI (clé API) ».")
+            self.sec_openai.header.setChecked(True)
+            return
+        if self.ai_pending is not None or BG.available():
             return
         key = self._ai_key(s)
-        if self.ai_pending is not None or BG.available():
-            return  # un calcul est déjà en cours ; l'aperçu se relancera à sa fin
         self.ai_pending = key
+        self.ai_preview_btn.setEnabled(False)
         th = AiPreviewThread(self.preview_src, s, key, mask_fn)
         th.status.connect(self.ai_status.setText)
         th.done.connect(self._on_ai_done)
@@ -850,13 +883,14 @@ class MainWindow(QMainWindow):
             self.ai_cache[key] = out
         if self.ai_pending == key:
             self.ai_pending = None
+        self.ai_preview_btn.setEnabled(True)
         self.ai_status.setText("Aperçu IA prêt.")
         self.refresh_preview()
 
     def _on_ai_failed(self, key, msg):
         if self.ai_pending == key:
             self.ai_pending = None
-        self.ai_cache[key] = None  # pas de nouvel essai automatique pour ces réglages
+        self.ai_preview_btn.setEnabled(True)
         self.ai_status.setText(f"Échec de l'IA : {msg}")
 
     def _on_ai_toggled(self, box, on):
@@ -879,15 +913,7 @@ class MainWindow(QMainWindow):
         is_oa = self.ai_openai_cb.isChecked()
         is_ai = is_oa or self.ai_local_cb.isChecked()
         self.pad_fill.setEnabled(on and not is_ai)  # l'IA remplace le choix de fond
-        for wdg in (self.openai_key, self.openai_key_label, self.openai_quality, self.openai_quality_label):
-            wdg.setVisible(is_oa)
-        self.ai_preview_btn.setVisible(is_ai)
-        self.ai_status.setVisible(is_ai)
-        if is_oa:
-            self.ai_status.setText("Images envoyées à OpenAI à l'export (≈ 0,05 à 0,20 € par image).")
-        elif is_ai:
-            self.ai_status.setText("Aperçu IA sur demande (bouton ci-dessus) ; l'IA est appliquée à l'export."
-                                   + ("" if OP.lama_ready() else " Modèle de 92 Mo téléchargé au 1er usage."))
+        self._update_ai_bar()
         self.pad_color_btn.setText(self.pad_color.name().upper())
         self.pad_color_btn.setStyleSheet(
             f"background:{self.pad_color.name()}; color:{'#000' if self.pad_color.lightness() > 128 else '#fff'};")
@@ -1061,11 +1087,15 @@ class MainWindow(QMainWindow):
                 mask_fn = self._preview_mask_fn(s)
                 if mask_fn is None:  # masque pas encore prêt : aperçu sans détourage
                     preview_s.bg_enabled = False
-            ai_fn = None
-            if s.pad_enabled and s.pad_fill in ("ai_local", "ai_openai"):
-                ai_fn = self._preview_ai_fn(preview_s, mask_fn, auto=False)  # aperçu IA sur bouton
             self.preview_info = {}
-            img = P.process(self.preview_src, preview_s, mask_fn, self.preview_info, ai_fn)
+            fallback = {"bg_ai": False}  # sans IA en attendant l'aperçu IA
+            if preview_s.pad_fill in ("ai_local", "ai_openai"):
+                fallback["pad_fill"] = "edge"
+            img = P.process(self.preview_src, P.Settings(**{**preview_s.__dict__, **fallback}),
+                            mask_fn, self.preview_info)
+            cached = self.ai_cache.get(self._ai_key(preview_s)) if self._ai_active(preview_s) else None
+            if cached is not None:
+                img = cached  # aperçu IA déjà calculé pour ces réglages
         self.preview.set_image(QPixmap.fromImage(pil_to_qimage(img)),
                                self.preview_src.width / self.preview_src.height)
         self.refresh_info()
@@ -1132,6 +1162,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{ok} image(s) exportée(s)", 8000)
         box = QMessageBox(QMessageBox.Warning if errors else QMessageBox.Information, "Export terminé", msg,
                           parent=self)
+        done_pic = QPixmap(str(asset_path("fin.jpg")))
+        if not done_pic.isNull():  # image de fin de tâche
+            box.setIconPixmap(done_pic.scaledToHeight(180, Qt.SmoothTransformation))
         open_btn = box.addButton("Ouvrir le dossier", QMessageBox.ActionRole)
         box.addButton(QMessageBox.Ok)
         box.exec()
@@ -1170,6 +1203,9 @@ def main():
     apply_dark_theme(app)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
+    icon = asset_path("icon.png")
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))
     win = MainWindow()
     win.show()
     if len(sys.argv) > 1:

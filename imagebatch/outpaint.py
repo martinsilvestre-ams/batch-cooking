@@ -42,7 +42,7 @@ def _composite_original(filled: Image.Image, img: Image.Image, ox: int, oy: int)
     """Recolle l'image d'origine sur le résultat de l'IA, avec un raccord adouci."""
     out = filled.convert("RGB").copy()
     w, h = img.size
-    f = max(2, round(min(w, h) * 0.01))
+    f = max(16, round(min(w, h) * 0.03))  # fondu de raccord (≈ 20-40 px)
     # on n'adoucit que les bords qui touchent une zone ajoutée
     edges = Image.new("L", (w, h), 255)
     nw, nh = out.size
@@ -195,6 +195,14 @@ def _flatten_row_drift(cur: Image.Image, added: int) -> Image.Image:
     pad = len(x) // 2
     sm = np.stack([np.convolve(np.pad(off[:, c], pad, mode="edge"), ker, mode="valid") for c in range(3)], 1)
     a[:added] -= sm[:, None, :]
+    # contraste : l'IA « lisse » les motifs fins ; on remet l'écart-type du bord d'origine
+    t_std = a[added:added + k].std(axis=1).mean(axis=0) + 1e-3  # (3,)
+    r_mean = a[:added].mean(axis=1, keepdims=True)
+    r_std = a[:added].std(axis=1)  # (added, 3)
+    r_std = np.stack([np.convolve(np.pad(r_std[:, c], pad, mode="edge"), ker, mode="valid")
+                      for c in range(3)], 1)
+    gain = np.clip(t_std[None, :] / (r_std + 1e-3), 1.0, 3.0)[:, None, :]
+    a[:added] = r_mean + (a[:added] - r_mean) * gain
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
 
 
@@ -250,48 +258,34 @@ def _multipart(fields: dict, files: dict) -> tuple[bytes, str]:
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
-def outpaint_openai(img: Image.Image, size: tuple[int, int], ox: int, oy: int, api_key: str,
-                    model: str = "gpt-image-1", quality: str = "high") -> Image.Image:
+def _openai_edit(base: Image.Image, mask: Image.Image, prompt: str, api_key: str,
+                 model: str = "gpt-image-1", quality: str = "high") -> Image.Image:
+    """Appelle images/edits : base (RGB) + masque (RGBA, transparent = à générer)."""
     if not api_key:
-        raise RuntimeError("Clé API OpenAI manquante (volet « Changer le ratio »).")
-    nw, nh = size
-    # format accepté par l'API le plus proche, image centrée dedans
-    tw, th = min(OPENAI_SIZES, key=lambda s: abs(s[0] / s[1] - nw / nh))
-    scale = min(tw / nw, th / nh)
-    sw, sh = round(nw * scale), round(nh * scale)
-    lx, ly = (tw - sw) // 2, (th - sh) // 2
-
-    base = Image.new("RGB", (tw, th))
-    base.paste(_prefill(img, size, ox, oy).resize((sw, sh), Image.LANCZOS), (lx, ly))
-    mask = Image.new("RGBA", (tw, th), (0, 0, 0, 0))  # transparent = zone à générer
-    keep = (lx + round(ox * scale), ly + round(oy * scale),
-            lx + round((ox + img.width) * scale), ly + round((oy + img.height) * scale))
-    mask.paste((0, 0, 0, 255), keep)
-
-    fields = {"model": model, "prompt": OPENAI_PROMPT, "size": f"{tw}x{th}", "quality": quality, "n": "1",
+        raise RuntimeError("Clé API OpenAI manquante (volet « IA OpenAI »).")
+    tw, th = base.size
+    fields = {"model": model, "prompt": prompt, "size": f"{tw}x{th}", "quality": quality, "n": "1",
               "input_fidelity": "high"}
-    body, ctype = _multipart(fields, {"image": ("image.png", _png(base)), "mask": ("mask.png", _png(mask))})
     try:
         import certifi
         ctx = ssl.create_default_context(cafile=certifi.where())
     except Exception:
         ctx = ssl.create_default_context()
 
-    def call(b, ct):
-        req = urllib.request.Request("https://api.openai.com/v1/images/edits", data=b, method="POST",
-                                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": ct})
+    def call():
+        body, ctype = _multipart(fields, {"image": ("image.png", _png(base)), "mask": ("mask.png", _png(mask))})
+        req = urllib.request.Request("https://api.openai.com/v1/images/edits", data=body, method="POST",
+                                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": ctype})
         with urllib.request.urlopen(req, context=ctx, timeout=300) as r:
             return json.loads(r.read())
 
     try:
-        data = call(body, ctype)
+        data = call()
     except urllib.error.HTTPError as e:
         msg = e.read().decode("utf-8", "replace")
         if e.code == 400 and "input_fidelity" in msg:  # modèle qui ne prend pas ce réglage
             fields.pop("input_fidelity")
-            body, ctype = _multipart(fields, {"image": ("image.png", _png(base)),
-                                              "mask": ("mask.png", _png(mask))})
-            data = call(body, ctype)
+            data = call()
         else:
             try:
                 msg = json.loads(msg)["error"]["message"]
@@ -299,10 +293,58 @@ def outpaint_openai(img: Image.Image, size: tuple[int, int], ox: int, oy: int, a
                 pass
             raise RuntimeError(f"OpenAI ({e.code}) : {msg}") from None
     result = Image.open(io.BytesIO(base64.b64decode(data["data"][0]["b64_json"]))).convert("RGB")
-    if result.size != (tw, th):
-        result = result.resize((tw, th), Image.LANCZOS)
+    return result if result.size == (tw, th) else result.resize((tw, th), Image.LANCZOS)
+
+
+def _letterbox(size: tuple[int, int]):
+    """Format accepté par l'API le plus proche, et placement de la toile dedans."""
+    nw, nh = size
+    tw, th = min(OPENAI_SIZES, key=lambda s: abs(s[0] / s[1] - nw / nh))
+    scale = min(tw / nw, th / nh)
+    sw, sh = round(nw * scale), round(nh * scale)
+    return tw, th, scale, sw, sh, (tw - sw) // 2, (th - sh) // 2
+
+
+def outpaint_openai(img: Image.Image, size: tuple[int, int], ox: int, oy: int, api_key: str,
+                    model: str = "gpt-image-1", quality: str = "high") -> Image.Image:
+    nw, nh = size
+    tw, th, scale, sw, sh, lx, ly = _letterbox(size)
+    base = Image.new("RGB", (tw, th))
+    base.paste(_prefill(img, size, ox, oy).resize((sw, sh), Image.LANCZOS), (lx, ly))
+    mask = Image.new("RGBA", (tw, th), (0, 0, 0, 0))  # transparent = zone à générer
+    keep = (lx + round(ox * scale), ly + round(oy * scale),
+            lx + round((ox + img.width) * scale), ly + round((oy + img.height) * scale))
+    mask.paste((0, 0, 0, 255), keep)
+    result = _openai_edit(base, mask, OPENAI_PROMPT, api_key, model, quality)
     filled = result.crop((lx, ly, lx + sw, ly + sh)).resize((nw, nh), Image.LANCZOS)
     return _composite_original(filled, img, ox, oy)
+
+
+BG_PROMPT = ("Replace only the background (the transparent area) with: {desc}. Keep the product exactly "
+             "as it is: same shape, colors, labels and text. Make it look like a real professional product "
+             "photo with consistent lighting, perspective and a natural contact shadow under the product. "
+             "Do not add any other product, text or logo.")
+
+
+def generate_background(img: Image.Image, subject_mask: Image.Image, description: str, api_key: str,
+                        model: str = "gpt-image-1", quality: str = "high") -> Image.Image:
+    """Nouveau fond généré par OpenAI d'après une description ; le produit
+    (masque de détourage) est recollé à l'identique par-dessus."""
+    w, h = img.size
+    tw, th, scale, sw, sh, lx, ly = _letterbox((w, h))
+    rgb = img.convert("RGB")
+    base = Image.new("RGB", (tw, th))
+    base.paste(rgb.resize((sw, sh), Image.LANCZOS), (lx, ly))
+    # zone à générer = tout sauf le produit (légèrement élargi pour garder son contour)
+    keep = subject_mask.resize((sw, sh), Image.BILINEAR).point(lambda v: 255 if v > 100 else 0)
+    keep = keep.filter(ImageFilter.MaxFilter(5))
+    mask = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    mask.paste((0, 0, 0, 255), (lx, ly), keep)
+    desc = description.strip() or "a clean, softly lit professional studio background"
+    result = _openai_edit(base, mask, BG_PROMPT.format(desc=desc), api_key, model, quality)
+    out = result.crop((lx, ly, lx + sw, ly + sh)).resize((w, h), Image.LANCZOS)
+    out.paste(rgb, (0, 0), subject_mask.filter(ImageFilter.GaussianBlur(max(1, max(w, h) / 1000))))
+    return out
 
 
 def outpaint(img: Image.Image, size: tuple[int, int], ox: int, oy: int, engine: str,

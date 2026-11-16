@@ -61,6 +61,8 @@ class Settings:
     bg_feather: int = 1  # adoucissement du contour (pour 1000 px)
     bg_trim: bool = False  # recadrer sur le sujet
     bg_margin: int = 10  # marge autour du sujet, en % du plus grand côté
+    bg_ai: bool = False  # nouveau fond généré par l'IA OpenAI
+    bg_prompt: str = ""  # description du nouveau fond
 
     # Changement de ratio en ajoutant du fond (sans recadrer)
     pad_enabled: bool = False
@@ -264,6 +266,9 @@ def _pad(img: Image.Image, s: Settings, info: Optional[dict] = None, ai_fn=None)
     if info is not None:
         info["pad"] = why
 
+    if s.pad_fill in ("ai_local", "ai_openai") and has_alpha:
+        # fond déjà transparent (détourage) : rien à inventer, on garde la transparence
+        s = Settings(**{**s.__dict__, "pad_fill": "transparent"})
     if s.pad_fill in ("ai_local", "ai_openai"):
         if ai_fn is None:
             from .outpaint import outpaint
@@ -352,6 +357,11 @@ def _replace_background(img: Image.Image, mask: Image.Image, s: Settings) -> Ima
             img = img.convert("RGB").crop(box)
             w, h = src.size
 
+    if s.bg_ai:
+        from .outpaint import generate_background
+        return generate_background(img.convert("RGB"), mask, s.bg_prompt, s.openai_key,
+                                   s.openai_model, s.openai_quality)
+
     if s.bg_fill == "color":
         canvas = Image.new("RGBA", (w, h), (*s.bg_color, 255))
     elif s.bg_fill == "image" and s.bg_image:
@@ -415,7 +425,7 @@ def process(img: Image.Image, s: Settings, mask_fn=None, info: Optional[dict] = 
     img = _enhance(img, s)
     if mask is not None:
         img = _replace_background(img, mask, s)
-        if s.bg_fill in ("color", "image", "blur"):
+        if s.bg_ai or s.bg_fill in ("color", "image", "blur"):
             img = img.convert("RGB")
     img = _pad(img, s, info, ai_fn)
     img = _resize(img, s)

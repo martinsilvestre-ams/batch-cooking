@@ -151,3 +151,60 @@ def test_openai_outpaint_keeps_original(monkeypatch):
     assert out.getpixel((200, 100)) == (30, 90, 160)  # original intact
     assert out.getpixel((200, 380)) == (10, 200, 10)  # zone ajoutée = IA
     assert b'name="mask"' in sent["body"] and b"1024x1024" in sent["body"]
+
+
+def test_combined_bg_ai_and_pad_ai(monkeypatch):
+    """Fond IA + agrandissement IA + recadrage sur le sujet, cumulés."""
+    import base64
+    import io
+    import json
+    import urllib.request
+
+    from PIL import ImageDraw
+
+    calls = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, context=None, timeout=None):
+        size = req.data.split(b'name="size"\r\n\r\n')[1].split(b"\r\n")[0].decode()
+        w, h = map(int, size.split("x"))
+        calls.append((size, b"Replace only the background" in req.data))
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h), (10, 200, 10)).save(buf, "PNG")
+        return Resp(json.dumps({"data": [{"b64_json": base64.b64encode(buf.getvalue()).decode()}]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    img = Image.new("RGB", (400, 200), (240, 240, 240))
+    mask = Image.new("L", (400, 200), 0)
+    ImageDraw.Draw(mask).rectangle([150, 50, 249, 199], fill=255)
+    ImageDraw.Draw(img).rectangle([150, 50, 249, 199], fill=(30, 90, 160))
+    s = P.Settings(bg_enabled=True, bg_ai=True, bg_prompt="marbre", bg_feather=0, openai_key="sk-test",
+                   pad_enabled=True, pad_ratio=(1, 1), pad_fill="ai_openai", pad_position="center")
+    out = P.process(img, s, mask_fn=lambda _im: mask)
+    assert out.size == (400, 400) and out.mode == "RGB"
+    assert out.getpixel((200, 200)) == (30, 90, 160)  # produit intact
+    assert out.getpixel((20, 150)) == (10, 200, 10)  # fond généré
+    assert out.getpixel((200, 20)) == (10, 200, 10)  # zone ajoutée générée
+    assert [c[1] for c in calls] == [True, False]  # 1 appel fond, 1 appel agrandissement
+
+
+def test_transparent_bg_with_pad_ai_stays_transparent():
+    img = Image.new("RGB", (200, 100), (240, 240, 240))
+    mask = Image.new("L", (200, 100), 0)
+    mask.paste(255, (80, 20, 120, 100))
+    s = P.Settings(bg_enabled=True, bg_fill="transparent", bg_feather=0,
+                   pad_enabled=True, pad_ratio=(1, 1), pad_fill="ai_local")
+    out = P.process(img, s, mask_fn=lambda _im: mask)  # aucun appel IA nécessaire
+    assert out.size == (200, 200) and out.mode == "RGBA" and out.getpixel((5, 5))[3] == 0
