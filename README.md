@@ -4,7 +4,7 @@ Application de bureau locale (Mac, Windows, Linux) pour traiter des images par l
 recadrer, changer le ratio en ajoutant du fond, redimensionner, convertir et retoucher.
 Tout se passe sur votre ordinateur, rien n'est envoyé en ligne.
 
-Stack : Python 3.10+, PySide6 (interface Qt native) et Pillow (traitement d'image).
+Stack : Python 3.9+ (le Python fourni par macOS suffit), PySide6 (interface Qt native) et Pillow (traitement d'image).
 
 ## Lancer l'application (Mac)
 
@@ -16,7 +16,7 @@ Stack : Python 3.10+, PySide6 (interface Qt native) et Pillow (traitement d'imag
 2. Lancez `./lancer.command` (ou double-cliquez dessus dans le Finder).
    Le premier lancement installe les dépendances dans `.venv` (1 à 2 minutes).
 
-Python 3 est requis : `python3 --version` doit répondre. Sinon : `brew install python`.
+Python 3.9 ou plus est requis : `python3 --version` doit répondre (celui fourni par macOS convient).
 
 ### Créer une vraie application `.app`
 
