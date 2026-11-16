@@ -58,8 +58,8 @@ def is_downloaded(key: str) -> bool:
     return model_path(key).exists()
 
 
-def download(key: str, progress: Optional[Callable[[int, int], None]] = None) -> Path:
-    dst = model_path(key)
+def fetch(url: str, dst: Path, progress: Optional[Callable[[int, int], None]] = None) -> Path:
+    """Télécharge url vers dst (une seule fois)."""
     if dst.exists():
         return dst
     tmp = dst.with_suffix(".part")
@@ -68,7 +68,7 @@ def download(key: str, progress: Optional[Callable[[int, int], None]] = None) ->
         ctx = ssl.create_default_context(cafile=certifi.where())
     except Exception:
         ctx = ssl.create_default_context()
-    req = urllib.request.Request(_BASE + MODELS[key][1], headers={"User-Agent": "ImageBatch"})
+    req = urllib.request.Request(url, headers={"User-Agent": "BatchCooking"})
     with urllib.request.urlopen(req, context=ctx, timeout=60) as r, open(tmp, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
@@ -82,6 +82,10 @@ def download(key: str, progress: Optional[Callable[[int, int], None]] = None) ->
                 progress(done, total)
     tmp.replace(dst)
     return dst
+
+
+def download(key: str, progress: Optional[Callable[[int, int], None]] = None) -> Path:
+    return fetch(_BASE + MODELS[key][1], model_path(key), progress)
 
 
 def _session(key: str):

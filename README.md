@@ -41,6 +41,11 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
 - **Changer le ratio en ajoutant du fond** : l'image entière est conservée et la toile est agrandie
   au ratio voulu, sans jamais étirer le produit. Fond au choix : prolongement du bord de l'image,
   couleur du fond détectée, couleur unie, image floutée, ou transparent.
+  Deux modes IA pour un agrandissement plus propre qu'en étirant :
+  « IA locale » (LaMa, gratuite et hors ligne, 92 Mo téléchargés une fois, idéale pour les fonds
+  simples) et « IA OpenAI » (meilleure sur les décors complexes ; nécessite une clé API créée sur
+  platform.openai.com, payante à l'usage, et les images sont envoyées à OpenAI). Dans les deux cas,
+  les pixels d'origine sont conservés à l'identique : seule la zone ajoutée est générée.
   En position « Auto », l'app détecte par la couleur des bords si le produit touche le haut ou
   le bas (ou un côté) de l'image, et ajoute le fond uniquement du côté opposé.
 - **Redimensionnement** : largeur fixe, hauteur fixe, tenir dans un cadre, dimensions exactes,
@@ -60,5 +65,6 @@ python main.py
 ```
 
 - `imagebatch/processing.py` : tout le traitement (sans interface, testable).
+- `imagebatch/outpaint.py` : l'agrandissement par IA (LaMa locale ou OpenAI).
 - `imagebatch/background.py` : le détourage (modèles ONNX via onnxruntime).
 - `imagebatch/app.py` : l'interface.

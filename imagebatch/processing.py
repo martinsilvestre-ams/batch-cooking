@@ -65,12 +65,15 @@ class Settings:
     # Changement de ratio en ajoutant du fond (sans recadrer)
     pad_enabled: bool = False
     pad_ratio: tuple[int, int] = (1, 1)
-    # "auto_color" | "color" | "blur" | "edge" | "transparent"
+    # "auto_color" | "color" | "blur" | "edge" | "transparent" | "ai_local" | "ai_openai"
     pad_fill: str = "blur"
     # "auto" (côté opposé au produit) | "center" | "start" (haut/gauche) | "end" (bas/droite)
     pad_position: str = "auto"
     pad_color: tuple[int, int, int] = (255, 255, 255)
     pad_blur: int = 40
+    openai_key: str = ""
+    openai_model: str = "gpt-image-1"
+    openai_quality: str = "high"  # "low" | "medium" | "high"
 
     # Redimensionnement : "none" | "width" | "height" | "fit" | "exact" | "percent"
     resize_mode: str = "none"
@@ -245,7 +248,7 @@ def _edge_band(strip: Image.Image, size: tuple[int, int]) -> Optional[Image.Imag
     return strip.resize(size, Image.BILINEAR)
 
 
-def _pad(img: Image.Image, s: Settings, info: Optional[dict] = None) -> Image.Image:
+def _pad(img: Image.Image, s: Settings, info: Optional[dict] = None, ai_fn=None) -> Image.Image:
     """Agrandit la toile au ratio voulu et remplit le fond manquant, sans déformer
     le produit : avec la position automatique, le fond est ajouté du côté opposé
     au bord touché par le produit."""
@@ -260,6 +263,18 @@ def _pad(img: Image.Image, s: Settings, info: Optional[dict] = None) -> Image.Im
     ox, oy, why = pad_offsets(img, (nw, nh), s.pad_position)
     if info is not None:
         info["pad"] = why
+
+    if s.pad_fill in ("ai_local", "ai_openai"):
+        if ai_fn is None:
+            from .outpaint import outpaint
+            out = outpaint(img, (nw, nh), ox, oy, "openai" if s.pad_fill == "ai_openai" else "local",
+                           s.openai_key, s.openai_model, s.openai_quality)
+        else:
+            out = ai_fn(img, (nw, nh), ox, oy)
+        if out is not None:
+            return out
+        # aperçu pas encore prêt : bords prolongés en attendant
+        s = Settings(**{**s.__dict__, "pad_fill": "edge"})
 
     if s.pad_fill == "transparent":
         canvas = Image.new("RGBA", (nw, nh), (0, 0, 0, 0))
@@ -383,7 +398,7 @@ def _enhance(img: Image.Image, s: Settings) -> Image.Image:
     return img
 
 
-def process(img: Image.Image, s: Settings, mask_fn=None, info: Optional[dict] = None) -> Image.Image:
+def process(img: Image.Image, s: Settings, mask_fn=None, info: Optional[dict] = None, ai_fn=None) -> Image.Image:
     """Ordre : recadrage -> rotation/miroir -> retouches -> remplacement du fond
     -> ajout de fond (ratio) -> redimensionnement.
 
@@ -402,7 +417,7 @@ def process(img: Image.Image, s: Settings, mask_fn=None, info: Optional[dict] = 
         img = _replace_background(img, mask, s)
         if s.bg_fill in ("color", "image", "blur"):
             img = img.convert("RGB")
-    img = _pad(img, s, info)
+    img = _pad(img, s, info, ai_fn)
     img = _resize(img, s)
     return img
 

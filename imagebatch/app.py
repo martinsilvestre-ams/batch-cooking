@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import background as BG
+from . import outpaint as OP
 from . import processing as P
 
 APP_NAME = "Numbered - Batch Cooking"
@@ -244,6 +245,38 @@ class MaskThread(QThread):
 # --------------------------------------------------------------------------- #
 # Export en tâche de fond
 # --------------------------------------------------------------------------- #
+class AiPreviewThread(QThread):
+    """Calcule l'agrandissement IA de l'aperçu (sans bloquer l'interface)."""
+    status = Signal(str)
+    done = Signal(object, object)
+    failed = Signal(object, str)
+
+    def __init__(self, img: Image.Image, s: P.Settings, key, mask_fn):
+        super().__init__()
+        self.img, self.s, self.key, self.mask_fn = img, s, key, mask_fn
+
+    def run(self):
+        try:
+            if self.s.pad_fill == "ai_local" and not OP.lama_ready():
+                OP.lama_download(lambda d, t: self.status.emit(
+                    f"Téléchargement de l'IA locale (une seule fois) {d * 100 // max(t, 1)} %…"))
+            if self.s.bg_enabled and not BG.is_downloaded(self.s.bg_model):
+                BG.download(self.s.bg_model)
+            self.status.emit("Agrandissement IA de l'aperçu en cours…")
+            box = {}
+
+            def ai(img, size, ox, oy):
+                box["out"] = OP.outpaint(img, size, ox, oy,
+                                         "openai" if self.s.pad_fill == "ai_openai" else "local",
+                                         self.s.openai_key, self.s.openai_model, self.s.openai_quality)
+                return box["out"]
+
+            P.process(self.img, self.s, self.mask_fn, None, ai)
+            self.done.emit(self.key, box.get("out"))
+        except Exception as exc:
+            self.failed.emit(self.key, str(exc))
+
+
 class ExportThread(QThread):
     progress = Signal(int, str)
     done = Signal(int, list)
@@ -261,6 +294,12 @@ class ExportThread(QThread):
                             lambda d, t: self.progress.emit(0, f"modèle de détourage ({d * 100 // max(t, 1)} %)"))
             except Exception as exc:
                 self.done.emit(0, [f"Téléchargement du modèle impossible : {exc}"])
+                return
+        if self.settings.pad_enabled and self.settings.pad_fill == "ai_local" and not OP.lama_ready():
+            try:
+                OP.lama_download(lambda d, t: self.progress.emit(0, f"IA locale ({d * 100 // max(t, 1)} %)"))
+            except Exception as exc:
+                self.done.emit(0, [f"Téléchargement de l'IA locale impossible : {exc}"])
                 return
         for i, f in enumerate(self.files):
             if self.cancelled:
@@ -291,6 +330,9 @@ class MainWindow(QMainWindow):
         self.mask_cache: dict = {}
         self.mask_threads: list = []
         self.mask_pending = None
+        self.ai_cache: dict = {}
+        self.ai_threads: list = []
+        self.ai_pending = None
 
         splitter = QSplitter()
         splitter.addWidget(self._build_file_panel())
@@ -458,7 +500,9 @@ class MainWindow(QMainWindow):
         self.pad_fill = QComboBox()
         for label, key in [("Prolonger le bord de l'image", "edge"), ("Couleur du fond détectée", "auto_color"),
                            ("Couleur unie", "color"), ("Image floutée", "blur"),
-                           ("Transparent (PNG/WEBP)", "transparent")]:
+                           ("Transparent (PNG/WEBP)", "transparent"),
+                           ("IA locale (gratuite, hors ligne)", "ai_local"),
+                           ("IA OpenAI (clé API, payant)", "ai_openai")]:
             self.pad_fill.addItem(label, key)
         self.pad_fill.currentIndexChanged.connect(self._update_pad_ui)
         f.addRow("Fond", self.pad_fill)
@@ -481,7 +525,26 @@ class MainWindow(QMainWindow):
         self.pad_blur.valueChanged.connect(self.refresh_preview)
         self.pad_blur_label = QLabel("Intensité du flou")
         f.addRow(self.pad_blur_label, self.pad_blur)
-        self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_color_btn, self.pad_blur]
+        self.openai_key = QLineEdit(self.qsettings.value("openai_key", ""))
+        self.openai_key.setEchoMode(QLineEdit.Password)
+        self.openai_key.setPlaceholderText("sk-… (platform.openai.com)")
+        self.openai_key.editingFinished.connect(
+            lambda: self.qsettings.setValue("openai_key", self.openai_key.text().strip()))
+        self.openai_key_label = QLabel("Clé API OpenAI")
+        f.addRow(self.openai_key_label, self.openai_key)
+        self.openai_quality = QComboBox()
+        for label, key in [("Haute", "high"), ("Moyenne (moins chère)", "medium"), ("Basse", "low")]:
+            self.openai_quality.addItem(label, key)
+        self.openai_quality_label = QLabel("Qualité OpenAI")
+        f.addRow(self.openai_quality_label, self.openai_quality)
+        self.ai_preview_btn = QPushButton("Générer l'aperçu IA de cette image")
+        self.ai_preview_btn.clicked.connect(self._start_ai_preview)
+        f.addRow(self.ai_preview_btn)
+        self.ai_status = QLabel("")
+        self.ai_status.setWordWrap(True)
+        f.addRow(self.ai_status)
+        self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_color_btn, self.pad_blur,
+                            self.openai_key, self.openai_quality, self.ai_preview_btn]
         v.addWidget(g)
 
         # Redimensionnement
@@ -622,6 +685,8 @@ class MainWindow(QMainWindow):
             pad_ratio=tuple(self.pad_ratio.currentData()),
             pad_fill=self.pad_fill.currentData(),
             pad_position=self.pad_position.currentData(),
+            openai_key=self.openai_key.text().strip(),
+            openai_quality=self.openai_quality.currentData(),
             pad_color=(self.pad_color.red(), self.pad_color.green(), self.pad_color.blue()),
             pad_blur=self.pad_blur.value(),
             resize_mode=self.resize_mode.currentData(),
@@ -730,6 +795,64 @@ class MainWindow(QMainWindow):
             self.mask_pending = None
         self.bg_status.setText(f"Échec du détourage : {msg}")
 
+    def _ai_key(self, s: P.Settings):
+        d = {k: v for k, v in s.__dict__.items()
+             if k not in ("resize_mode", "width", "height", "percent", "no_upscale", "out_format",
+                          "quality", "suffix", "keep_metadata", "openai_key")}
+        return (str(self.preview_path), repr(sorted(d.items())))
+
+    def _preview_ai_fn(self, s: P.Settings, mask_fn, auto: bool):
+        key = self._ai_key(s)
+        if key in self.ai_cache:
+            out = self.ai_cache[key]
+            return lambda *_a: out  # None après un échec : bords prolongés
+        if auto and s.bg_enabled and mask_fn is None:
+            auto = False  # on attend d'abord le détourage
+        if auto:
+            self._start_ai_preview(s=s, mask_fn=mask_fn)
+        return lambda *_a: None
+
+    def _start_ai_preview(self, *_, s: P.Settings = None, mask_fn=None):
+        if self.preview_src is None:
+            return
+        if s is None:
+            s = P.Settings(**{**self.current_settings().__dict__, "resize_mode": "none"})
+            if s.bg_enabled:
+                mask_fn = self._preview_mask_fn(s)
+                if mask_fn is None:
+                    self.ai_status.setText("Détourage en cours, réessayez dans un instant.")
+                    return
+        if s.pad_fill == "ai_openai" and not s.openai_key:
+            self.ai_status.setText("Collez d'abord votre clé API OpenAI.")
+            return
+        key = self._ai_key(s)
+        if self.ai_pending is not None or BG.available():
+            return  # un calcul est déjà en cours ; l'aperçu se relancera à sa fin
+        self.ai_pending = key
+        th = AiPreviewThread(self.preview_src, s, key, mask_fn)
+        th.status.connect(self.ai_status.setText)
+        th.done.connect(self._on_ai_done)
+        th.failed.connect(self._on_ai_failed)
+        th.finished.connect(lambda th=th: self.ai_threads.remove(th) if th in self.ai_threads else None)
+        self.ai_threads.append(th)
+        th.start()
+
+    def _on_ai_done(self, key, out):
+        if len(self.ai_cache) > 20:
+            self.ai_cache.clear()
+        if out is not None:
+            self.ai_cache[key] = out
+        if self.ai_pending == key:
+            self.ai_pending = None
+        self.ai_status.setText("Aperçu IA prêt.")
+        self.refresh_preview()
+
+    def _on_ai_failed(self, key, msg):
+        if self.ai_pending == key:
+            self.ai_pending = None
+        self.ai_cache[key] = None  # pas de nouvel essai automatique pour ces réglages
+        self.ai_status.setText(f"Échec de l'IA : {msg}")
+
     def _update_pad_ui(self):
         on = self.pad_enabled.isChecked()
         for w in self.pad_widgets:
@@ -739,6 +862,16 @@ class MainWindow(QMainWindow):
         self.pad_color_label.setVisible(fill == "color")
         self.pad_blur.setVisible(fill == "blur")
         self.pad_blur_label.setVisible(fill == "blur")
+        is_oa, is_ai = fill == "ai_openai", fill in ("ai_local", "ai_openai")
+        for wdg in (self.openai_key, self.openai_key_label, self.openai_quality, self.openai_quality_label):
+            wdg.setVisible(is_oa)
+        self.ai_preview_btn.setVisible(is_oa)
+        self.ai_status.setVisible(is_ai)
+        if is_oa:
+            self.ai_status.setText("Images envoyées à OpenAI à l'export (≈ 0,05 à 0,20 € par image).")
+        elif is_ai:
+            self.ai_status.setText("" if OP.lama_ready() else
+                                   "L'IA locale (92 Mo) sera téléchargée au premier usage.")
         self.pad_color_btn.setText(self.pad_color.name().upper())
         self.pad_color_btn.setStyleSheet(
             f"background:{self.pad_color.name()}; color:{'#000' if self.pad_color.lightness() > 128 else '#fff'};")
@@ -912,8 +1045,11 @@ class MainWindow(QMainWindow):
                 mask_fn = self._preview_mask_fn(s)
                 if mask_fn is None:  # masque pas encore prêt : aperçu sans détourage
                     preview_s.bg_enabled = False
+            ai_fn = None
+            if s.pad_enabled and s.pad_fill in ("ai_local", "ai_openai"):
+                ai_fn = self._preview_ai_fn(preview_s, mask_fn, auto=s.pad_fill == "ai_local")
             self.preview_info = {}
-            img = P.process(self.preview_src, preview_s, mask_fn, self.preview_info)
+            img = P.process(self.preview_src, preview_s, mask_fn, self.preview_info, ai_fn)
         self.preview.set_image(QPixmap.fromImage(pil_to_qimage(img)),
                                self.preview_src.width / self.preview_src.height)
         self.refresh_info()

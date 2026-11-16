@@ -112,3 +112,42 @@ def test_pad_auto_extends_opposite_side_of_product():
     assert P.pad_offsets(centered, (800, 800), "auto")[1] == 150
     s.pad_fill = "auto_color"
     assert P.process(im, s).getpixel((5, 5)) == bg
+
+
+def test_openai_outpaint_keeps_original(monkeypatch):
+    import base64
+    import io
+    import json
+    import urllib.request
+
+    from imagebatch import outpaint as OP  # noqa: F401
+
+    sent = {}
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, context=None, timeout=None):
+        sent["body"] = req.data
+        buf = io.BytesIO()
+        Image.new("RGB", (1024, 1024), (10, 200, 10)).save(buf, "PNG")
+        return Resp(json.dumps({"data": [{"b64_json": base64.b64encode(buf.getvalue()).decode()}]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    img = Image.new("RGB", (400, 200), (30, 90, 160))
+    out = P.process(img, P.Settings(pad_enabled=True, pad_ratio=(1, 1), pad_fill="ai_openai",
+                                    pad_position="end", openai_key="sk-test"))
+    assert out.size == (400, 400)
+    assert out.getpixel((200, 100)) == (30, 90, 160)  # original intact
+    assert out.getpixel((200, 380)) == (10, 200, 10)  # zone ajoutée = IA
+    assert b'name="mask"' in sent["body"] and b"1024x1024" in sent["body"]
