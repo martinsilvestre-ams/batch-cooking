@@ -40,8 +40,9 @@ def pil_to_qimage(img: Image.Image) -> QImage:
 # Section repliable (fermée par défaut)
 # --------------------------------------------------------------------------- #
 class Section(QWidget):
-    def __init__(self, title: str, expanded: bool = False):
+    def __init__(self, title: str, expanded: bool = False, collapsible: bool = True):
         super().__init__()
+        self.collapsible = collapsible
         self._title = title
         self.header = QToolButton()
         self.header.setText(title)
@@ -54,6 +55,11 @@ class Section(QWidget):
             " text-align: left; background: #38383c; }"
             "QToolButton:hover { background: #424247; }")
         self.header.toggled.connect(self._toggle)
+        if not collapsible:  # toujours ouvert
+            expanded = True
+            self.header.setChecked(True)
+            self.header.setEnabled(False)
+            self.header.setStyleSheet(self.header.styleSheet() + "QToolButton:disabled { color: palette(text); }")
         self.body = QWidget()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -64,6 +70,12 @@ class Section(QWidget):
         self._toggle(expanded)
 
     def _toggle(self, on: bool):
+        if not hasattr(self, "body"):
+            return
+        if not self.collapsible:
+            self.header.setArrowType(Qt.NoArrow)
+            self.body.setVisible(True)
+            return
         self.header.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
         self.body.setVisible(on)
 
@@ -527,7 +539,7 @@ class MainWindow(QMainWindow):
         v.addWidget(g)
 
         # Export
-        g = self.sec_export = Section("Export")
+        g = self.sec_export = Section("Export", collapsible=False)
         f = QFormLayout(g.body)
         f.setContentsMargins(8, 4, 4, 10)
         self.out_format = QComboBox()
