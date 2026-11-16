@@ -452,20 +452,20 @@ def _add_sun_shadow(canvas: Image.Image, mask: Image.Image, strength: float,
         return canvas
     size = max(box[2] - box[0], box[3] - box[1])
     dx, dy = -sun_x / dist, -sun_y / dist  # l'ombre part à l'opposé du soleil
-    length = size * (0.04 + 0.9 * dist ** 1.6)
-    steps = max(4, min(400, int(length / 1.5)))  # pas fins : pas d'escalier
-    acc = Image.new("L", (sw, sh), 0)
-    for i in range(steps + 1):
-        t = i / steps
-        k = (1 - t) ** 1.2 * 0.8 + 0.2 * (1 - t)  # de plus en plus claire en s'éloignant
+    # Lumière douce de studio : plusieurs ombres décalées et de plus en plus floues
+    # (contact serré + halo large), ce qui donne une décroissance naturelle, non linéaire,
+    # plus marquée le long des bords opposés à la lumière.
+    reach = size * (0.008 + 0.09 * dist ** 1.3)  # décalage max (soleil bas = plus loin)
+    soft = 0.4 + 1.6 * softness
+    layers = [(0.12, 0.004, 0.55), (0.45, 0.018, 0.35), (1.0, 0.045, 0.22), (1.6, 0.09, 0.10)]
+    inv = Image.new("L", (sw, sh), 255)  # produit des (1 - a) : cumul des couches
+    for off, blur, weight in layers:
         layer = Image.new("L", (sw, sh), 0)
-        layer.paste(m.point(lambda v, k=k: int(v * k)), (round(dx * length * t), round(dy * length * t)))
-        acc = ImageChops.lighter(acc, layer)
-    # flou progressif : net près du produit (valeurs fortes), flou au loin (valeurs faibles)
-    near = acc.filter(ImageFilter.GaussianBlur(1 + softness * size * 0.01))
-    far = acc.filter(ImageFilter.GaussianBlur(2 + softness * size * 0.08))
-    acc = Image.composite(near, far, near)
-    alpha = acc.resize((w, h), Image.BICUBIC).point(lambda v: int(v * min(1.0, strength) * 0.75))
+        layer.paste(m, (round(dx * reach * off), round(dy * reach * off)))
+        layer = layer.filter(ImageFilter.GaussianBlur(max(0.6, size * blur * soft)))
+        inv = ImageChops.multiply(inv, layer.point(lambda v, k=weight: 255 - int(v * k)))
+    acc = ImageChops.invert(inv)
+    alpha = acc.resize((w, h), Image.BICUBIC).point(lambda v: min(255, int(v * min(1.0, strength) * 1.1)))
     # ombre légèrement teintée (plus naturelle qu'un noir pur)
     tint = canvas.convert("RGB").resize((1, 1), Image.BOX).getpixel((0, 0))
     dark = Image.new("RGBA", (w, h), tuple(int(c * 0.25) for c in tint) + (0,))

@@ -647,7 +647,7 @@ class MainWindow(QMainWindow):
         f.addRow(self.bg_shadow_label, self.bg_shadow)
         self.bg_shadow_mode = QComboBox()
         self.bg_shadow_mode.addItem("Sous le produit (contact)", "contact")
-        self.bg_shadow_mode.addItem("Soleil : ombre portée longue", "sun")
+        self.bg_shadow_mode.addItem("Lumière orientable (ombre douce)", "sun")
         self.bg_shadow_mode.currentIndexChanged.connect(self._update_bg_ui)
         self.bg_shadow_mode.currentIndexChanged.connect(
             lambda: self.bg_shadow.setValue(60) if self.bg_shadow.value() == 0 else None)
