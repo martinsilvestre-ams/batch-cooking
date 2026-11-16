@@ -430,6 +430,24 @@ def studio_background(size: tuple[int, int], color: tuple[int, int, int]) -> Ima
     return Image.fromarray(out.clip(0, 255).round().astype(np.uint8))
 
 
+def _apply_shadow(canvas: Image.Image, alpha: Image.Image, depth: float = 0.75) -> Image.Image:
+    """Applique l'ombre en mode « produit » (multiply) : le fond est assombri dans sa
+    propre teinte (une ombre sur fond beige reste beige foncé, pas grise).
+    Sur un fond transparent, l'ombre devient une zone noire semi-transparente."""
+    import numpy as np
+
+    c = np.asarray(canvas.convert("RGBA"), np.float32)
+    a = np.asarray(alpha, np.float32)[:, :, None] / 255.0
+    rgb, op = c[:, :, :3], c[:, :, 3:] / 255.0
+    rgb = rgb * (1 - a * depth)  # multiply par un gris (1 - depth) dosé par l'ombre
+    # zones transparentes : l'ombre y ajoute de l'opacité (noir translucide)
+    sh_op = a * depth
+    new_op = op + sh_op * (1 - op)
+    rgb = np.where(new_op > 0, rgb * op / np.maximum(new_op, 1e-6), 0)
+    out = np.concatenate([rgb, new_op * 255], axis=2)
+    return Image.fromarray(out.clip(0, 255).round().astype(np.uint8))
+
+
 def _add_sun_shadow(canvas: Image.Image, mask: Image.Image, strength: float,
                     sun_x: float, sun_y: float, softness: float) -> Image.Image:
     """Ombre portée « naturelle » : la silhouette projetée à l'opposé du soleil.
@@ -466,13 +484,7 @@ def _add_sun_shadow(canvas: Image.Image, mask: Image.Image, strength: float,
         inv = ImageChops.multiply(inv, layer.point(lambda v, k=weight: 255 - int(v * k)))
     acc = ImageChops.invert(inv)
     alpha = acc.resize((w, h), Image.BICUBIC).point(lambda v: min(255, int(v * min(1.0, strength) * 1.1)))
-    # ombre légèrement teintée (plus naturelle qu'un noir pur)
-    tint = canvas.convert("RGB").resize((1, 1), Image.BOX).getpixel((0, 0))
-    dark = Image.new("RGBA", (w, h), tuple(int(c * 0.25) for c in tint) + (0,))
-    dark.putalpha(alpha)
-    out = canvas.copy()
-    out.alpha_composite(dark)
-    return out
+    return _apply_shadow(canvas, alpha)
 
 
 def _add_shadow(canvas: Image.Image, mask: Image.Image, strength: float) -> Image.Image:
@@ -500,11 +512,7 @@ def _add_shadow(canvas: Image.Image, mask: Image.Image, strength: float) -> Imag
     base = base.filter(ImageFilter.GaussianBlur(max(1, size * 0.008)))
     sh = ImageChops.lighter(soft, base.point(lambda v: int(v * 0.8)))
     sh = sh.point(lambda v: int(v * min(1.0, strength)))
-    dark = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    dark.putalpha(sh)
-    out = canvas.copy()
-    out.alpha_composite(dark)
-    return out
+    return _apply_shadow(canvas, sh)
 
 
 def _enhance(img: Image.Image, s: Settings) -> Image.Image:

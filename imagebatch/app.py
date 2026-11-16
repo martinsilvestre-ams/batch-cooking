@@ -96,6 +96,48 @@ class Section(QWidget):
 # --------------------------------------------------------------------------- #
 # Aperçu avec zone de recadrage interactive
 # --------------------------------------------------------------------------- #
+class SpinSlider(QWidget):
+    """Curseur + champ numérique synchronisés : on peut glisser ou taper la valeur.
+    offset : valeur affichée = valeur du curseur - offset (ex. retouches -100..+100)."""
+    valueChanged = Signal(int)
+
+    def __init__(self, offset: int = 0, suffix: str = ""):
+        super().__init__()
+        self.offset = offset
+        self.slider = QSlider(Qt.Horizontal)
+        self.spin = QSpinBox()
+        self.spin.setSuffix(suffix)
+        self.spin.setKeyboardTracking(False)  # valeur appliquée à Entrée / sortie du champ
+        self.spin.setFixedWidth(68)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.slider, 1)
+        lay.addWidget(self.spin)
+        self.slider.valueChanged.connect(self._from_slider)
+        self.spin.valueChanged.connect(lambda v: self.slider.setValue(v + self.offset))
+
+    def _from_slider(self, v):
+        self.spin.blockSignals(True)
+        self.spin.setValue(v - self.offset)
+        self.spin.blockSignals(False)
+        self.valueChanged.emit(v)
+
+    def setRange(self, lo, hi):
+        self.slider.setRange(lo, hi)
+        self.spin.setRange(lo - self.offset, hi - self.offset)
+        self._from_slider(self.slider.value())
+
+    def setValue(self, v):
+        self.slider.setValue(v)
+
+    def value(self):
+        return self.slider.value()
+
+    def setToolTip(self, t):
+        self.slider.setToolTip(t)
+        self.spin.setToolTip(t)
+
+
 class SunPad(QWidget):
     """Petit disque où l'on place le soleil : l'ombre part du côté opposé,
     et plus le soleil est près du bord (soleil bas), plus l'ombre est longue."""
@@ -148,6 +190,18 @@ class SunPad(QWidget):
         self.x, self.y = round(x, 3), round(y, 3)
         self.update()
         self.moved.emit(self.x, self.y)
+
+    def set_xy(self, x, y):
+        self.x, self.y = round(x, 3), round(y, 3)
+        self.update()
+        self.moved.emit(self.x, self.y)
+
+    def polar(self):
+        """(angle en degrés, 0 = lumière en haut, sens horaire ; distance 0..100)."""
+        import math
+        d = min(1.0, math.hypot(self.x, self.y))
+        a = math.degrees(math.atan2(self.x, -self.y)) % 360 if d > 0 else 0
+        return round(a) % 360, round(d * 100)
 
     def mousePressEvent(self, e):
         self._set(e.position())
@@ -551,19 +605,14 @@ class MainWindow(QMainWindow):
         v.addWidget(self.count)
         return w
 
-    def _slider(self, label: str, form: QFormLayout) -> QSlider:
-        s = QSlider(Qt.Horizontal)
+    def _slider(self, label: str, form: QFormLayout) -> "SpinSlider":
+        s = SpinSlider(offset=100)
         s.setRange(0, 200)
         s.setValue(100)
-        val = QLabel("0")
-        val.setMinimumWidth(32)
-        s.valueChanged.connect(lambda x: val.setText(f"{x - 100:+d}" if x != 100 else "0"))
         s.valueChanged.connect(self.refresh_preview)
-        s.mouseDoubleClickEvent = lambda _e: s.setValue(100)
-        h = QHBoxLayout()
-        h.addWidget(s, 1)
-        h.addWidget(val)
-        form.addRow(label, h)
+        s.slider.mouseDoubleClickEvent = lambda _e: s.setValue(100)
+        s.setToolTip("Double-clic sur le curseur pour revenir à 0")
+        form.addRow(label, s)
         return s
 
     def _build_settings_panel(self) -> QWidget:
@@ -633,12 +682,12 @@ class MainWindow(QMainWindow):
         self.bg_image_path = ""
         self.bg_image_label = QLabel("Image")
         f.addRow(self.bg_image_label, self.bg_image_btn)
-        self.bg_feather = QSlider(Qt.Horizontal)
+        self.bg_feather = SpinSlider()
         self.bg_feather.setRange(0, 10)
         self.bg_feather.setValue(1)
         self.bg_feather.valueChanged.connect(self.refresh_preview)
         f.addRow("Adoucir le contour", self.bg_feather)
-        self.bg_shadow = QSlider(Qt.Horizontal)
+        self.bg_shadow = SpinSlider()
         self.bg_shadow.setRange(0, 100)
         self.bg_shadow.setValue(0)
         self.bg_shadow.setToolTip("Ombre sous le produit, calculée à partir du détourage (0 = aucune). Gratuit, hors ligne.")
@@ -655,9 +704,27 @@ class MainWindow(QMainWindow):
         f.addRow(self.bg_shadow_mode_label, self.bg_shadow_mode)
         self.sun_pad = SunPad()
         self.sun_pad.moved.connect(lambda *_: self.refresh_preview())
-        self.sun_label = QLabel("Soleil")
+        self.sun_label = QLabel("Lumière")
         f.addRow(self.sun_label, self.sun_pad)
-        self.sun_blur = QSlider(Qt.Horizontal)
+        self.sun_angle = QSpinBox()
+        self.sun_angle.setRange(0, 359)
+        self.sun_angle.setSuffix(" °")
+        self.sun_angle.setWrapping(True)
+        self.sun_angle.setKeyboardTracking(False)
+        self.sun_angle.setToolTip("Direction de la lumière : 0° = en haut, 90° = à droite, 180° = en bas, 270° = à gauche")
+        self.sun_dist = QSpinBox()
+        self.sun_dist.setRange(0, 100)
+        self.sun_dist.setKeyboardTracking(False)
+        self.sun_dist.setToolTip("0 = lumière au-dessus (ombre très courte), 100 = lumière rasante (ombre la plus étendue)")
+        self.sun_angle_label = QLabel("Direction de la lumière")
+        f.addRow(self.sun_angle_label, self.sun_angle)
+        self.sun_dist_label = QLabel("Longueur de l'ombre")
+        f.addRow(self.sun_dist_label, self.sun_dist)
+        self.sun_angle.valueChanged.connect(self._sun_from_fields)
+        self.sun_dist.valueChanged.connect(self._sun_from_fields)
+        self.sun_pad.moved.connect(self._sun_to_fields)
+        self._sun_to_fields()
+        self.sun_blur = SpinSlider()
         self.sun_blur.setRange(0, 100)
         self.sun_blur.setValue(50)
         self.sun_blur.valueChanged.connect(self.refresh_preview)
@@ -743,7 +810,7 @@ class MainWindow(QMainWindow):
         hb.addWidget(self.pad_color_btn, 1)
         hb.addWidget(self.pad_color_hex, 1)
         f.addRow(self.pad_color_label, self.pad_color_box)
-        self.pad_blur = QSlider(Qt.Horizontal)
+        self.pad_blur = SpinSlider()
         self.pad_blur.setRange(5, 120)
         self.pad_blur.setValue(40)
         self.pad_blur.valueChanged.connect(self.refresh_preview)
@@ -1119,7 +1186,7 @@ class MainWindow(QMainWindow):
                          (self.bg_color_label, fill in ("color", "studio") and not bg_ai),
                          (self.bg_shadow, not bg_ai), (self.bg_shadow_label, not bg_ai),
                          (self.bg_shadow_mode, not bg_ai), (self.bg_shadow_mode_label, not bg_ai),
-                         (self.sun_pad, sun), (self.sun_label, sun),
+                         (self.sun_pad, sun), (self.sun_label, sun), (self.sun_angle, sun), (self.sun_angle_label, sun), (self.sun_dist, sun), (self.sun_dist_label, sun),
                          (self.sun_blur, sun), (self.sun_blur_label, sun),
                          (self.bg_image_btn, fill == "image" and not bg_ai),
                          (self.bg_image_label, fill == "image" and not bg_ai),
@@ -1292,6 +1359,18 @@ class MainWindow(QMainWindow):
         self.pad_color_btn.setStyleSheet(
             f"background:{self.pad_color.name()}; color:{'#000' if self.pad_color.lightness() > 128 else '#fff'};")
         self.refresh_preview()
+
+    def _sun_to_fields(self, *_):
+        a, d = self.sun_pad.polar()
+        for w, v in ((self.sun_angle, a), (self.sun_dist, d)):
+            w.blockSignals(True)
+            w.setValue(v)
+            w.blockSignals(False)
+
+    def _sun_from_fields(self, *_):
+        import math
+        a, d = math.radians(self.sun_angle.value()), self.sun_dist.value() / 100
+        self.sun_pad.set_xy(d * math.sin(a), -d * math.cos(a))
 
     def _typed_color(self, which: str):
         field = getattr(self, f"{which}_color_hex")

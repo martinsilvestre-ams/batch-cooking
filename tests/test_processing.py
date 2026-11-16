@@ -273,4 +273,4 @@ def test_sun_shadow_falls_opposite_the_sun():
     s = P.Settings(bg_enabled=True, bg_fill="color", bg_color=(240, 240, 240), bg_shadow=80,
                    bg_shadow_mode="sun", sun_x=-0.8, sun_y=-0.6)  # soleil en haut à gauche
     out = np.asarray(P.process(img, s, mask_fn=lambda im: mask), np.int16).mean(axis=2)
-    assert out[258, 258] < out[142, 142] - 10  # ombre en bas à droite, rien en haut à gauche
+    assert out[255, 255] < out[142, 142] - 10  # ombre en bas à droite, rien en haut à gauche
