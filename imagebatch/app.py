@@ -19,7 +19,8 @@ from . import background as BG
 from . import processing as P
 
 APP_NAME = "Numbered - Batch Cooking"
-PREVIEW_MAX = 1400  # taille max de l'image utilisée pour l'aperçu
+PREVIEW_MAX = 1400
+PREVIEW_BG = QColor(222, 222, 222)  # fond gris clair derrière les images  # taille max de l'image utilisée pour l'aperçu
 THUMB = 64
 
 
@@ -68,9 +69,9 @@ class PreviewWidget(QWidget):
 
     def paintEvent(self, _e):
         p = QPainter(self)
-        p.fillRect(self.rect(), self.palette().window().color().darker(108))
+        p.fillRect(self.rect(), PREVIEW_BG)  # gris clair fixe, même en thème sombre
         if not self._pix:
-            p.setPen(self.palette().text().color())
+            p.setPen(QColor(70, 70, 70))
             p.drawText(self.rect(), Qt.AlignCenter, self.message)
             return
         # damier pour la transparence
@@ -913,8 +914,33 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(out))
 
 
+def apply_dark_theme(app: QApplication) -> None:
+    """Thème sombre, identique sur tous les systèmes."""
+    from PySide6.QtGui import QPalette
+
+    app.setStyle("Fusion")
+    pal = QPalette()
+    base, window, text = QColor(30, 30, 32), QColor(42, 42, 45), QColor(230, 230, 230)
+    accent = QColor(64, 128, 230)
+    for role, color in [
+        (QPalette.Window, window), (QPalette.WindowText, text), (QPalette.Base, base),
+        (QPalette.AlternateBase, QColor(48, 48, 52)), (QPalette.ToolTipBase, QColor(55, 55, 60)),
+        (QPalette.ToolTipText, text), (QPalette.Text, text), (QPalette.Button, QColor(55, 55, 60)),
+        (QPalette.ButtonText, text), (QPalette.BrightText, QColor(255, 90, 90)),
+        (QPalette.Highlight, accent), (QPalette.HighlightedText, QColor(255, 255, 255)),
+        (QPalette.Link, accent), (QPalette.PlaceholderText, QColor(140, 140, 140)),
+    ]:
+        pal.setColor(role, color)
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        pal.setColor(QPalette.Disabled, role, QColor(115, 115, 115))
+    pal.setColor(QPalette.Disabled, QPalette.Button, QColor(45, 45, 48))
+    app.setPalette(pal)
+    app.setStyleSheet("QGroupBox { font-weight: 600; } QToolTip { border: 1px solid #555; }")
+
+
 def main():
     app = QApplication(sys.argv)
+    apply_dark_theme(app)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     win = MainWindow()
