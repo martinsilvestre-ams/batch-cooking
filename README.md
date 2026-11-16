@@ -39,7 +39,10 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
   et Précis (BiRefNet, plus lent). Le modèle est téléchargé une seule fois (170 à 220 Mo) dans
   `~/Library/Application Support/ImageBatch/models`.
 - **Changer le ratio en ajoutant du fond** : l'image entière est conservée et la toile est agrandie
-  au ratio voulu. Fond au choix : image floutée, couleur unie, bords étirés, ou transparent.
+  au ratio voulu, sans jamais étirer le produit. Fond au choix : prolongement du bord de l'image,
+  couleur du fond détectée, couleur unie, image floutée, ou transparent.
+  En position « Auto », l'app détecte par la couleur des bords si le produit touche le haut ou
+  le bas (ou un côté) de l'image, et ajoute le fond uniquement du côté opposé.
 - **Redimensionnement** : largeur fixe, hauteur fixe, tenir dans un cadre, dimensions exactes,
   pourcentage, avec option « ne jamais agrandir ».
 - **Retouches** : rotation, miroirs, luminosité, contraste, saturation, netteté, noir et blanc.

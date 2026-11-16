@@ -93,3 +93,22 @@ def test_replace_background_with_given_mask(tmp_path):
     s.bg_fill = "transparent"
     out = P.process(img, s, mask_fn=lambda _im: mask)
     assert out.mode == "RGBA" and out.getpixel((2, 2))[3] == 0
+
+
+def test_pad_auto_extends_opposite_side_of_product():
+    from PIL import ImageDraw
+    bg = (230, 230, 228)
+    im = Image.new("RGB", (800, 500), bg)
+    ImageDraw.Draw(im).rectangle([300, 150, 500, 499], fill=(30, 90, 160))  # sort par le bas
+    s = P.Settings(pad_enabled=True, pad_ratio=(1, 1), pad_fill="edge", pad_position="auto")
+    info = {}
+    out = P.process(im, s, info=info)
+    assert out.size == (800, 800) and info["pad"] == "fond ajouté en haut"
+    assert out.getpixel((400, 799)) == (30, 90, 160)  # produit toujours collé en bas
+    assert out.getpixel((400, 10)) == bg  # fond prolongé en haut, produit non étiré
+    assert P.pad_offsets(im.transpose(Image.FLIP_TOP_BOTTOM), (800, 800), "auto")[1] == 0
+    centered = Image.new("RGB", (800, 500), bg)
+    ImageDraw.Draw(centered).ellipse([300, 150, 500, 350], fill=(200, 0, 0))
+    assert P.pad_offsets(centered, (800, 800), "auto")[1] == 150
+    s.pad_fill = "auto_color"
+    assert P.process(im, s).getpixel((5, 5)) == bg

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
@@ -64,8 +65,10 @@ class Settings:
     # Changement de ratio en ajoutant du fond (sans recadrer)
     pad_enabled: bool = False
     pad_ratio: tuple[int, int] = (1, 1)
-    # "color" | "blur" | "edge" | "transparent"
+    # "auto_color" | "color" | "blur" | "edge" | "transparent"
     pad_fill: str = "blur"
+    # "auto" (côté opposé au produit) | "center" | "start" (haut/gauche) | "end" (bas/droite)
+    pad_position: str = "auto"
     pad_color: tuple[int, int, int] = (255, 255, 255)
     pad_blur: int = 40
 
@@ -165,8 +168,87 @@ def padded_size(size: tuple[int, int], ratio: tuple[int, int]) -> tuple[int, int
     return max(w, round(h * t)), h
 
 
-def _pad(img: Image.Image, s: Settings) -> Image.Image:
-    """Agrandit la toile au ratio voulu et remplit le fond manquant."""
+def estimate_background(img: Image.Image) -> tuple[int, int, int]:
+    """Couleur de fond estimée : médiane des pixels du pourtour de l'image."""
+    small = img.convert("RGB")
+    small.thumbnail((256, 256))
+    w, h = small.size
+    b = max(1, round(min(w, h) * 0.03))
+    strips = [small.crop((0, 0, w, b)), small.crop((0, h - b, w, h)),
+              small.crop((0, 0, b, h)), small.crop((w - b, 0, w, h))]
+    px = [p for st in strips for p in st.getdata()]
+    return tuple(sorted(c[i] for c in px)[len(px) // 2] for i in range(3))  # type: ignore[return-value]
+
+
+def edge_contact(img: Image.Image, tol: int = 40) -> dict:
+    """Part (0..1) de chaque bord occupée par le sujet.
+
+    Image transparente : on regarde l'opacité. Sinon, on compare les pixels du bord
+    à la couleur de fond estimée (détection par couleur)."""
+    small = img.copy()
+    small.thumbnail((256, 256))
+    w, h = small.size
+    b = max(1, round(min(w, h) * 0.02))
+    boxes = {"top": (0, 0, w, b), "bottom": (0, h - b, w, h),
+             "left": (0, 0, b, h), "right": (w - b, 0, w, h)}
+    out = {}
+    if small.mode in ("RGBA", "LA"):
+        alpha = small.getchannel("A")
+        for k, box in boxes.items():
+            data = list(alpha.crop(box).getdata())
+            out[k] = sum(1 for a in data if a > 128) / len(data)
+        return out
+    rgb = small.convert("RGB")
+    bg = estimate_background(rgb)
+    for k, box in boxes.items():
+        data = list(rgb.crop(box).getdata())
+        diff = sum(1 for c in data if max(abs(c[0] - bg[0]), abs(c[1] - bg[1]), abs(c[2] - bg[2])) > tol)
+        out[k] = diff / len(data)
+    return out
+
+
+def pad_offsets(img: Image.Image, new_size: tuple[int, int], position: str) -> tuple[int, int, str]:
+    """Position de l'image dans la nouvelle toile.
+
+    position : "auto" (détecte le côté où le produit touche le bord et ajoute
+    le fond du côté opposé), "center", "start" (fond ajouté en haut / à gauche),
+    "end" (fond ajouté en bas / à droite). Renvoie (ox, oy, explication)."""
+    w, h = img.size
+    nw, nh = new_size
+    dx, dy = nw - w, nh - h
+    vertical = dy > 0
+    a, b = ("top", "bottom") if vertical else ("left", "right")
+    where = {"top": "en haut", "bottom": "en bas", "left": "à gauche", "right": "à droite"}
+
+    if position == "auto":
+        c = edge_contact(img)
+        thr = 0.08
+        if c[b] > thr and c[b] > c[a] * 2 + 0.02:
+            position = "start"  # produit collé en bas / à droite -> fond en haut / à gauche
+        elif c[a] > thr and c[a] > c[b] * 2 + 0.02:
+            position = "end"
+        else:
+            position = "center"
+    if position == "start":
+        off, why = (dx, dy), f"fond ajouté {where[a]}"
+    elif position == "end":
+        off, why = (0, 0), f"fond ajouté {where[b]}"
+    else:
+        off, why = (dx // 2, dy // 2), "fond ajouté des deux côtés"
+    return off[0], off[1], why
+
+
+def _edge_band(strip: Image.Image, size: tuple[int, int]) -> Optional[Image.Image]:
+    """Étire une bande de bord (moyennée pour éviter les stries) à la taille voulue."""
+    if size[0] <= 0 or size[1] <= 0:
+        return None
+    return strip.resize(size, Image.BILINEAR)
+
+
+def _pad(img: Image.Image, s: Settings, info: Optional[dict] = None) -> Image.Image:
+    """Agrandit la toile au ratio voulu et remplit le fond manquant, sans déformer
+    le produit : avec la position automatique, le fond est ajouté du côté opposé
+    au bord touché par le produit."""
     if not s.pad_enabled:
         return img
     w, h = img.size
@@ -175,20 +257,31 @@ def _pad(img: Image.Image, s: Settings) -> Image.Image:
         return img
     has_alpha = img.mode in ("RGBA", "LA")
     src = img.convert("RGBA")
-    ox, oy = (nw - w) // 2, (nh - h) // 2
+    ox, oy, why = pad_offsets(img, (nw, nh), s.pad_position)
+    if info is not None:
+        info["pad"] = why
 
     if s.pad_fill == "transparent":
         canvas = Image.new("RGBA", (nw, nh), (0, 0, 0, 0))
     elif s.pad_fill == "color":
         canvas = Image.new("RGBA", (nw, nh), (*s.pad_color, 255))
+    elif s.pad_fill == "auto_color":
+        canvas = Image.new("RGBA", (nw, nh), (*estimate_background(img), 255))
     elif s.pad_fill == "edge":
         canvas = Image.new("RGBA", (nw, nh))
+        k = max(1, min(w, h) // 200)  # quelques pixels moyennés
         if nw > w:  # bandes gauche / droite
-            canvas.paste(src.crop((0, 0, 1, h)).resize((ox, h)), (0, oy))
-            canvas.paste(src.crop((w - 1, 0, w, h)).resize((nw - w - ox, h)), (ox + w, oy))
+            left = src.crop((0, 0, k, h)).resize((1, h), Image.BOX)
+            right = src.crop((w - k, 0, w, h)).resize((1, h), Image.BOX)
+            for band, x in ((_edge_band(left, (ox, h)), 0), (_edge_band(right, (nw - w - ox, h)), ox + w)):
+                if band:
+                    canvas.paste(band, (x, oy))
         if nh > h:  # bandes haut / bas
-            canvas.paste(src.crop((0, 0, w, 1)).resize((w, oy)), (ox, 0))
-            canvas.paste(src.crop((0, h - 1, w, h)).resize((w, nh - h - oy)), (ox, oy + h))
+            top = src.crop((0, 0, w, k)).resize((w, 1), Image.BOX)
+            bottom = src.crop((0, h - k, w, h)).resize((w, 1), Image.BOX)
+            for band, y in ((_edge_band(top, (w, oy)), 0), (_edge_band(bottom, (w, nh - h - oy)), oy + h)):
+                if band:
+                    canvas.paste(band, (ox, y))
     else:  # "blur" : l'image agrandie pour couvrir la toile, floutée
         scale = max(nw / w, nh / h)
         # on floute sur une version réduite (beaucoup plus rapide), puis on agrandit
@@ -290,7 +383,7 @@ def _enhance(img: Image.Image, s: Settings) -> Image.Image:
     return img
 
 
-def process(img: Image.Image, s: Settings, mask_fn=None) -> Image.Image:
+def process(img: Image.Image, s: Settings, mask_fn=None, info: Optional[dict] = None) -> Image.Image:
     """Ordre : recadrage -> rotation/miroir -> retouches -> remplacement du fond
     -> ajout de fond (ratio) -> redimensionnement.
 
@@ -309,7 +402,7 @@ def process(img: Image.Image, s: Settings, mask_fn=None) -> Image.Image:
         img = _replace_background(img, mask, s)
         if s.bg_fill in ("color", "image", "blur"):
             img = img.convert("RGB")
-    img = _pad(img, s)
+    img = _pad(img, s, info)
     img = _resize(img, s)
     return img
 

@@ -401,11 +401,20 @@ class MainWindow(QMainWindow):
         self.pad_ratio.currentIndexChanged.connect(self.refresh_preview)
         f.addRow("Ratio", self.pad_ratio)
         self.pad_fill = QComboBox()
-        for label, key in [("Image floutée", "blur"), ("Couleur unie", "color"),
-                           ("Bords étirés", "edge"), ("Transparent (PNG/WEBP)", "transparent")]:
+        for label, key in [("Prolonger le bord de l'image", "edge"), ("Couleur du fond détectée", "auto_color"),
+                           ("Couleur unie", "color"), ("Image floutée", "blur"),
+                           ("Transparent (PNG/WEBP)", "transparent")]:
             self.pad_fill.addItem(label, key)
         self.pad_fill.currentIndexChanged.connect(self._update_pad_ui)
         f.addRow("Fond", self.pad_fill)
+        self.pad_position = QComboBox()
+        for label, key in [("Auto : côté opposé au produit", "auto"), ("Des deux côtés (centré)", "center"),
+                           ("En haut / à gauche", "start"), ("En bas / à droite", "end")]:
+            self.pad_position.addItem(label, key)
+        self.pad_position.setToolTip("Auto détecte si le produit touche le haut ou le bas (ou un côté)\n"
+                                     "par la couleur des bords, et ajoute le fond uniquement à l'opposé.")
+        self.pad_position.currentIndexChanged.connect(self.refresh_preview)
+        f.addRow("Ajouter le fond", self.pad_position)
         self.pad_color = QColor(255, 255, 255)
         self.pad_color_btn = QPushButton()
         self.pad_color_btn.clicked.connect(self._choose_pad_color)
@@ -417,7 +426,7 @@ class MainWindow(QMainWindow):
         self.pad_blur.valueChanged.connect(self.refresh_preview)
         self.pad_blur_label = QLabel("Intensité du flou")
         f.addRow(self.pad_blur_label, self.pad_blur)
-        self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_color_btn, self.pad_blur]
+        self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_color_btn, self.pad_blur]
         v.addWidget(g)
 
         # Redimensionnement
@@ -547,6 +556,7 @@ class MainWindow(QMainWindow):
             pad_enabled=self.pad_enabled.isChecked(),
             pad_ratio=tuple(self.pad_ratio.currentData()),
             pad_fill=self.pad_fill.currentData(),
+            pad_position=self.pad_position.currentData(),
             pad_color=(self.pad_color.red(), self.pad_color.green(), self.pad_color.blue()),
             pad_blur=self.pad_blur.value(),
             resize_mode=self.resize_mode.currentData(),
@@ -825,7 +835,8 @@ class MainWindow(QMainWindow):
                 mask_fn = self._preview_mask_fn(s)
                 if mask_fn is None:  # masque pas encore prêt : aperçu sans détourage
                     preview_s.bg_enabled = False
-            img = P.process(self.preview_src, preview_s, mask_fn)
+            self.preview_info = {}
+            img = P.process(self.preview_src, preview_s, mask_fn, self.preview_info)
         self.preview.set_image(QPixmap.fromImage(pil_to_qimage(img)),
                                self.preview_src.width / self.preview_src.height)
         self.refresh_info()
@@ -837,7 +848,8 @@ class MainWindow(QMainWindow):
         ow, oh = self.orig_size
         nw, nh = P.output_size((ow, oh), s)
         out = f"{nw}×{nh} px" if nw else "taille selon le sujet"
-        self.info.setText(f"{self.preview_path.name} — {ow}×{oh} → {out}")
+        note = getattr(self, "preview_info", {}).get("pad") if s.pad_enabled else None
+        self.info.setText(f"{self.preview_path.name} — {ow}×{oh} → {out}" + (f" ({note})" if note else ""))
 
     # ---------- export ----------
     def export(self):
