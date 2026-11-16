@@ -10,9 +10,9 @@ from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QThread, Signa
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSlider,
-    QSpinBox, QSplitter, QStatusBar, QVBoxLayout, QWidget,
+    QSizePolicy, QSpinBox, QSplitter, QStatusBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import background as BG
@@ -34,6 +34,44 @@ def pil_to_qimage(img: Image.Image) -> QImage:
         data = img.tobytes("raw", "RGBA")
         q = QImage(data, img.width, img.height, img.width * 4, QImage.Format_RGBA8888)
     return q.copy()  # détache des octets Python
+
+
+# --------------------------------------------------------------------------- #
+# Section repliable (fermée par défaut)
+# --------------------------------------------------------------------------- #
+class Section(QWidget):
+    def __init__(self, title: str, expanded: bool = False):
+        super().__init__()
+        self._title = title
+        self.header = QToolButton()
+        self.header.setText(title)
+        self.header.setCheckable(True)
+        self.header.setChecked(expanded)
+        self.header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.header.setStyleSheet(
+            "QToolButton { border: none; border-radius: 4px; padding: 7px 6px; font-weight: 600;"
+            " text-align: left; background: #38383c; }"
+            "QToolButton:hover { background: #424247; }")
+        self.header.toggled.connect(self._toggle)
+        self.body = QWidget()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        lay.addWidget(self.header)
+        lay.addWidget(self.body)
+        self._active = False
+        self._toggle(expanded)
+
+    def _toggle(self, on: bool):
+        self.header.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self.body.setVisible(on)
+
+    def set_active(self, active: bool):
+        """Pastille dans le titre quand l'option modifie les images."""
+        if active != self._active:
+            self._active = active
+            self.header.setText(f"{self._title}   ●" if active else self._title)
 
 
 # --------------------------------------------------------------------------- #
@@ -320,8 +358,9 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(inner)
 
         # Recadrage
-        g = QGroupBox("Recadrage")
-        f = QFormLayout(g)
+        g = self.sec_crop = Section("Recadrage")
+        f = QFormLayout(g.body)
+        f.setContentsMargins(8, 4, 4, 10)
         self.crop_mode = QComboBox()
         self.crop_mode.addItem("Aucun", "none")
         self.crop_mode.addItem("Centré selon un ratio", "ratio")
@@ -344,8 +383,9 @@ class MainWindow(QMainWindow):
         v.addWidget(g)
 
         # Remplacement du fond
-        g = QGroupBox("Remplacer le fond (détourage)")
-        f = QFormLayout(g)
+        g = self.sec_bg = Section("Remplacer le fond (détourage)")
+        f = QFormLayout(g.body)
+        f.setContentsMargins(8, 4, 4, 10)
         self.bg_enabled = QCheckBox("Activer")
         self.bg_enabled.toggled.connect(self._update_bg_ui)
         f.addRow(self.bg_enabled)
@@ -392,8 +432,9 @@ class MainWindow(QMainWindow):
         v.addWidget(g)
 
         # Changement de ratio avec ajout de fond
-        g = QGroupBox("Changer le ratio (ajouter du fond)")
-        f = QFormLayout(g)
+        g = self.sec_pad = Section("Changer le ratio (ajouter du fond)")
+        f = QFormLayout(g.body)
+        f.setContentsMargins(8, 4, 4, 10)
         self.pad_enabled = QCheckBox("Activer")
         self.pad_enabled.toggled.connect(self._update_pad_ui)
         f.addRow(self.pad_enabled)
@@ -432,8 +473,9 @@ class MainWindow(QMainWindow):
         v.addWidget(g)
 
         # Redimensionnement
-        g = QGroupBox("Redimensionnement")
-        f = QFormLayout(g)
+        g = self.sec_resize = Section("Redimensionnement")
+        f = QFormLayout(g.body)
+        f.setContentsMargins(8, 4, 4, 10)
         self.resize_mode = QComboBox()
         for label, key in [("Aucun", "none"), ("Largeur fixe", "width"), ("Hauteur fixe", "height"),
                            ("Tenir dans un cadre", "fit"), ("Dimensions exactes (déforme)", "exact"),
@@ -457,8 +499,9 @@ class MainWindow(QMainWindow):
         v.addWidget(g)
 
         # Retouches
-        g = QGroupBox("Retouches")
-        f = QFormLayout(g)
+        g = self.sec_edit = Section("Retouches")
+        f = QFormLayout(g.body)
+        f.setContentsMargins(8, 4, 4, 10)
         self.rotate = QComboBox()
         for label, deg in [("0°", 0), ("90° horaire", 90), ("180°", 180), ("90° anti-horaire", 270)]:
             self.rotate.addItem(label, deg)
@@ -484,8 +527,9 @@ class MainWindow(QMainWindow):
         v.addWidget(g)
 
         # Export
-        g = QGroupBox("Export")
-        f = QFormLayout(g)
+        g = self.sec_export = Section("Export")
+        f = QFormLayout(g.body)
+        f.setContentsMargins(8, 4, 4, 10)
         self.out_format = QComboBox()
         self.out_format.addItems(list(P.OUTPUT_FORMATS))
         self.out_format.currentIndexChanged.connect(self._update_quality_ui)
@@ -506,9 +550,18 @@ class MainWindow(QMainWindow):
         out_row.addWidget(self.out_dir, 1)
         out_row.addWidget(b_out)
         f.addRow("Dossier", out_row)
+        v.addWidget(g)
+        v.addStretch()
+
+        self._update_quality_ui()
+        scroll = QScrollArea()
+        scroll.setWidget(inner)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        # Barre d'export toujours visible sous les réglages
         self.progress = QProgressBar()
         self.progress.setVisible(False)
-        f.addRow(self.progress)
         btns = QHBoxLayout()
         self.export_btn = QPushButton("Exporter toutes les images")
         self.export_btn.setDefault(True)
@@ -519,16 +572,14 @@ class MainWindow(QMainWindow):
         self.cancel_btn.clicked.connect(self.cancel_export)
         btns.addWidget(self.export_btn, 1)
         btns.addWidget(self.cancel_btn)
-        f.addRow(btns)
-        v.addWidget(g)
-        v.addStretch()
-
-        self._update_quality_ui()
-        scroll = QScrollArea()
-        scroll.setWidget(inner)
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(340)
-        return scroll
+        panel = QWidget()
+        pl = QVBoxLayout(panel)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.addWidget(scroll, 1)
+        pl.addWidget(self.progress)
+        pl.addLayout(btns)
+        panel.setMinimumWidth(340)
+        return panel
 
     def _build_menu(self):
         m = self.menuBar().addMenu("Fichier")
@@ -816,10 +867,22 @@ class MainWindow(QMainWindow):
             return
         self.refresh_preview()
 
+    def _update_section_markers(self, s: P.Settings):
+        if not hasattr(self, "sec_export"):
+            return
+        self.sec_crop.set_active(s.crop_mode != "none")
+        self.sec_bg.set_active(s.bg_enabled)
+        self.sec_pad.set_active(s.pad_enabled)
+        self.sec_resize.set_active(s.resize_mode != "none")
+        self.sec_edit.set_active(bool(s.rotate or s.flip_h or s.flip_v or s.grayscale) or any(
+            abs(x - 1.0) > 1e-3 for x in (s.brightness, s.contrast, s.saturation, s.sharpness)))
+        self.sec_export.set_active(False)
+
     def refresh_preview(self, *_):
-        if not hasattr(self, "preview"):
+        if not hasattr(self, "preview") or not hasattr(self, "export_btn"):
             return
         s = self.current_settings()
+        self._update_section_markers(s)
         manual = s.crop_mode == "manual"
         self.preview.edit_crop = manual and not self.compare.isChecked()
         if self.preview_src is None:
@@ -935,7 +998,7 @@ def apply_dark_theme(app: QApplication) -> None:
         pal.setColor(QPalette.Disabled, role, QColor(115, 115, 115))
     pal.setColor(QPalette.Disabled, QPalette.Button, QColor(45, 45, 48))
     app.setPalette(pal)
-    app.setStyleSheet("QGroupBox { font-weight: 600; } QToolTip { border: 1px solid #555; }")
+    app.setStyleSheet("QToolTip { border: 1px solid #555; }")
 
 
 def main():
