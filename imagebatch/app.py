@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from . import background as BG
 from . import processing as P
 
+APP_NAME = "Numbered - Batch Cooking"
 PREVIEW_MAX = 1400  # taille max de l'image utilisée pour l'aperçu
 THUMB = 64
 
@@ -229,7 +230,7 @@ class ExportThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Image Batch")
+        self.setWindowTitle(APP_NAME)
         self.resize(1400, 860)
         self.setAcceptDrops(True)
         self.qsettings = QSettings("ImageBatch", "ImageBatch")
@@ -497,7 +498,7 @@ class MainWindow(QMainWindow):
         self.keep_meta = QCheckBox("Conserver EXIF / profil couleur")
         f.addRow(self.keep_meta)
         out_row = QHBoxLayout()
-        self.out_dir = QLineEdit(self.qsettings.value("out_dir", str(Path.home() / "Pictures" / "Image Batch")))
+        self.out_dir = QLineEdit(self.qsettings.value("out_dir", str(Path.home() / "Pictures" / "Batch Cooking")))
         b_out = QPushButton("…")
         b_out.setFixedWidth(32)
         b_out.clicked.connect(self.choose_out_dir)
@@ -857,20 +858,20 @@ class MainWindow(QMainWindow):
             return
         files = [Path(self.list.item(i).data(Qt.UserRole)) for i in range(self.list.count())]
         if not files:
-            QMessageBox.information(self, "Image Batch", "Ajoutez d'abord des images.")
+            QMessageBox.information(self, APP_NAME, "Ajoutez d'abord des images.")
             return
         out = Path(self.out_dir.text()).expanduser()
         s = self.current_settings()
         if not s.suffix and any(f.parent.resolve() == out.resolve() for f in files if out.exists()):
             # Jamais d'écrasement : output_path ajoute _1, _2… mais on prévient
-            if QMessageBox.question(self, "Image Batch",
+            if QMessageBox.question(self, APP_NAME,
                                     "Le dossier d'export contient des originaux et aucun suffixe n'est "
                                     "défini. Les copies seront numérotées (_1, _2…). Continuer ?") != QMessageBox.Yes:
                 return
         try:
             out.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self, "Image Batch", f"Dossier d'export invalide : {exc}")
+            QMessageBox.warning(self, APP_NAME, f"Dossier d'export invalide : {exc}")
             return
         self.qsettings.setValue("out_dir", str(out))
         self.progress.setRange(0, len(files))
@@ -914,7 +915,8 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Image Batch")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
     win = MainWindow()
     win.show()
     if len(sys.argv) > 1:

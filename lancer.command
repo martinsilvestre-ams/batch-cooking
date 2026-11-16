@@ -1,5 +1,5 @@
 #!/bin/bash
-# Double-cliquez sur ce fichier dans le Finder pour lancer Image Batch.
+# Double-cliquez sur ce fichier dans le Finder pour lancer Numbered - Batch Cooking.
 # Au premier lancement, il installe ce qu'il faut dans un dossier .venv (1 à 2 min).
 cd "$(dirname "$0")"
 if [ ! -x .venv/bin/python ]; then

@@ -1,4 +1,4 @@
-# Image Batch
+# Numbered - Batch Cooking
 
 Application de bureau locale (Mac, Windows, Linux) pour traiter des images par lot :
 recadrer, changer le ratio en ajoutant du fond, redimensionner, convertir et retoucher.
@@ -23,7 +23,7 @@ Python 3.9 ou plus est requis : `python3 --version` doit répondre (celui fourni
 ```bash
 ./build_mac.sh
 ```
-Cela produit `dist/Image Batch.app`, à glisser dans le dossier Applications.
+Cela produit `dist/Numbered - Batch Cooking.app`, à glisser dans le dossier Applications.
 Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'app, puis « Ouvrir ».
 
 ## Fonctionnalités
