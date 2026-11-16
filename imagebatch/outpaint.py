@@ -167,7 +167,7 @@ def _extend_top(cur: Image.Image, amount: int) -> Image.Image:
         # fondu entre la partie régénérée et l'original sur les ov lignes
         a = np.linspace(0, 1, ov, dtype=np.float32)[:, None, None]
         blended = band[step:] * (1 - a) + known * a
-        top = np.concatenate([band[:step], blended], axis=0).clip(0, 255).astype(np.uint8)
+        top = np.concatenate([band[:step], blended], axis=0).clip(0, 255).round().astype(np.uint8)
         new = Image.new("RGB", (w, h + step))
         new.paste(cur, (0, step))
         new.paste(Image.fromarray(top), (0, 0))
@@ -214,7 +214,7 @@ def _noise_sigma(a) -> float:
 
     if a.shape[0] < 5 or a.shape[1] < 5:
         return 0.0
-    lum = Image.fromarray(a.mean(axis=2).clip(0, 255).astype(np.uint8), "L")
+    lum = Image.fromarray(a.mean(axis=2).clip(0, 255).round().astype(np.uint8))
     hp = np.asarray(lum, np.float32) - np.asarray(lum.filter(ImageFilter.GaussianBlur(1.5)), np.float32)
     return float(min(10.0, 1.4826 * np.median(np.abs(hp - np.median(hp))) * 1.15))
 
@@ -249,7 +249,10 @@ def _smooth_extend_top(cur: Image.Image, amount: int, seed: int = 0) -> Image.Im
     pad = len(x) // 2
     prof = np.stack([np.convolve(np.pad(prof[:, c], pad, mode="reflect" if w > pad else "edge"), ker, "valid")
                      for c in range(3)], 1)
-    far = np.median(band.reshape(-1, 3), axis=0)
+    flat = band.reshape(-1, 3)
+    lo, hi = np.percentile(flat, [10, 90], axis=0)
+    far = np.where((flat >= lo) & (flat <= hi), flat, np.nan)
+    far = np.nan_to_num(np.nanmean(far, axis=0), nan=0.0) if flat.size else flat.mean(axis=0)  # moyenne robuste
     d = np.arange(amount, 0, -1, dtype=np.float32)[:, None, None]  # distance au bord
     t = 1 - np.exp(-d / max(8.0, h * 0.25))
     top = prof[None] * (1 - t) + far[None, None] * t
@@ -257,7 +260,7 @@ def _smooth_extend_top(cur: Image.Image, amount: int, seed: int = 0) -> Image.Im
     if g > 0.3:
         top = top + _grain((amount, w), g, seed)[:, :, None]
     out = Image.new("RGB", (w, h + amount))
-    out.paste(Image.fromarray(top.clip(0, 255).astype(np.uint8)), (0, 0))
+    out.paste(Image.fromarray(top.clip(0, 255).round().astype(np.uint8)), (0, 0))
     out.paste(cur, (0, amount))
     return out
 
@@ -342,7 +345,7 @@ def outpaint_local(img: Image.Image, size: tuple[int, int], ox: int, oy: int) ->
     big = cur.resize((nw, nh), Image.LANCZOS)
     if grain > 0.3:
         n = _grain((nh, nw), grain, 0)
-        big = Image.fromarray((np.asarray(big, np.float32) + n[:, :, None]).clip(0, 255).astype(np.uint8))
+        big = Image.fromarray((np.asarray(big, np.float32) + n[:, :, None]).clip(0, 255).round().astype(np.uint8))
     return _composite_original(big, img, ox, oy)
 
 
