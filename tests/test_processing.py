@@ -219,3 +219,17 @@ def test_auto_position_with_large_product_at_bottom():
     assert P.estimate_background(img) == (245, 245, 245)
     ox, oy, why = P.pad_offsets(img, (400, 400), "auto")
     assert (ox, oy) == (0, 100) and "haut" in why
+
+
+def test_generated_fill_does_not_stretch_pixels():
+    # Bord très bruité : l'étirement ferait des stries verticales, le fond généré non.
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    a = (120 + rng.normal(0, 15, (300, 400, 3))).clip(0, 255).astype("uint8")
+    img = Image.fromarray(a)
+    out = P.process(img, P.Settings(pad_enabled=True, pad_ratio=(1, 1), pad_fill="generated", pad_position="start"))
+    assert out.size == (400, 400)
+    added = np.asarray(out, np.float32)[:60].mean(axis=2)
+    assert added.mean(axis=0).std() < 3  # pas de colonnes recopiées
+    assert np.allclose(np.asarray(out)[200:], a[100:])  # l'original est intact

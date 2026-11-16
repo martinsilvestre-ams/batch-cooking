@@ -288,8 +288,8 @@ def _pad(img: Image.Image, s: Settings, info: Optional[dict] = None, ai_fn=None)
             out = ai_fn(img, (nw, nh), ox, oy)
         if out is not None:
             return out
-        # aperçu pas encore prêt : bords prolongés en attendant
-        s = Settings(**{**s.__dict__, "pad_fill": "edge"})
+        # aperçu pas encore prêt : fond généré lisse en attendant
+        s = Settings(**{**s.__dict__, "pad_fill": "generated"})
 
     if s.pad_fill == "transparent":
         canvas = Image.new("RGBA", (nw, nh), (0, 0, 0, 0))
@@ -297,6 +297,13 @@ def _pad(img: Image.Image, s: Settings, info: Optional[dict] = None, ai_fn=None)
         canvas = Image.new("RGBA", (nw, nh), (*s.pad_color, 255))
     elif s.pad_fill == "auto_color":
         canvas = Image.new("RGBA", (nw, nh), (*estimate_background(img), 255))
+    elif s.pad_fill == "generated":
+        from .outpaint import smooth_fill
+        out = smooth_fill(img, (nw, nh), ox, oy)
+        if has_alpha:
+            canvas = out.convert("RGBA")
+        else:
+            return out
     elif s.pad_fill == "edge":
         canvas = Image.new("RGBA", (nw, nh))
         k = max(1, min(w, h) // 200)  # quelques pixels moyennés

@@ -516,7 +516,8 @@ class MainWindow(QMainWindow):
         self.pad_ratio.currentIndexChanged.connect(self.refresh_preview)
         f.addRow("Ratio", self.pad_ratio)
         self.pad_fill = QComboBox()
-        for label, key in [("Prolonger le bord de l'image", "edge"), ("Couleur du fond détectée", "auto_color"),
+        for label, key in [("Fond généré propre (sans étirement)", "generated"),
+                           ("Prolonger le bord (étire les pixels)", "edge"), ("Couleur du fond détectée", "auto_color"),
                            ("Couleur unie", "color"), ("Image floutée", "blur"),
                            ("Transparent (PNG/WEBP)", "transparent")]:
             self.pad_fill.addItem(label, key)
@@ -1150,7 +1151,7 @@ class MainWindow(QMainWindow):
             self.preview_info = {}
             fallback = {"bg_ai": False}  # sans IA en attendant l'aperçu IA
             if preview_s.pad_fill in ("ai_local", "ai_openai"):
-                fallback["pad_fill"] = "edge"
+                fallback["pad_fill"] = "generated"
             img = P.process(self.preview_src, P.Settings(**{**preview_s.__dict__, **fallback}),
                             mask_fn, self.preview_info)
             cached = self.ai_cache.get(self._ai_key(preview_s)) if self._ai_active(preview_s) else None

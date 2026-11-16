@@ -38,11 +38,12 @@ _lock = threading.Lock()
 # --------------------------------------------------------------------------- #
 # Outils communs
 # --------------------------------------------------------------------------- #
-def _composite_original(filled: Image.Image, img: Image.Image, ox: int, oy: int) -> Image.Image:
+def _composite_original(filled: Image.Image, img: Image.Image, ox: int, oy: int,
+                        feather: float = 0.03) -> Image.Image:
     """Recolle l'image d'origine sur le résultat de l'IA, avec un raccord adouci."""
     out = filled.convert("RGB").copy()
     w, h = img.size
-    f = max(16, round(min(w, h) * 0.03))  # fondu de raccord (≈ 20-40 px)
+    f = max(16, round(min(w, h) * feather))  # fondu de raccord (≈ 20-40 px)
     # on n'adoucit que les bords qui touchent une zone ajoutée
     edges = Image.new("L", (w, h), 255)
     nw, nh = out.size
@@ -201,9 +202,113 @@ def _flatten_row_drift(cur: Image.Image, added: int) -> Image.Image:
     r_std = a[:added].std(axis=1)  # (added, 3)
     r_std = np.stack([np.convolve(np.pad(r_std[:, c], pad, mode="edge"), ker, mode="valid")
                       for c in range(3)], 1)
-    gain = np.clip(t_std[None, :] / (r_std + 1e-3), 1.0, 3.0)[:, None, :]
+    gain = np.clip(t_std[None, :] / (r_std + 1e-3), 1.0, 1.6)[:, None, :]
     a[:added] = r_mean + (a[:added] - r_mean) * gain
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
+
+
+def _noise_sigma(a) -> float:
+    """Grain de l'image (écart-type du bruit fin), estimé de façon robuste (MAD)
+    sur l'écart à une version floutée. Plafonné pour ne pas exagérer."""
+    import numpy as np
+
+    if a.shape[0] < 5 or a.shape[1] < 5:
+        return 0.0
+    lum = Image.fromarray(a.mean(axis=2).clip(0, 255).astype(np.uint8), "L")
+    hp = np.asarray(lum, np.float32) - np.asarray(lum.filter(ImageFilter.GaussianBlur(1.5)), np.float32)
+    return float(min(10.0, 1.4826 * np.median(np.abs(hp - np.median(hp))) * 1.15))
+
+
+def _grain(shape, sigma: float, seed: int = 0):
+    """Grain photo propre (bruit gaussien légèrement adouci), d'écart-type ≈ sigma."""
+    import numpy as np
+
+    n = np.random.default_rng(seed).normal(0, 1, (shape[0] + 2, shape[1] + 2)).astype(np.float32)
+    n = (4 * n[1:-1, 1:-1] + n[:-2, 1:-1] + n[2:, 1:-1] + n[1:-1, :-2] + n[1:-1, 2:]) / 8
+    return n * (sigma / max(float(n.std()), 1e-6))
+
+
+def _smooth_extend_top(cur: Image.Image, amount: int, seed: int = 0) -> Image.Image:
+    """Ajoute `amount` lignes en haut sans recopier de pixels : la couleur du bord est
+    lissée (les défauts de compression disparaissent), prolongée en fondu vers la
+    teinte moyenne du bord, puis un grain léger et propre est ajouté."""
+    import numpy as np
+
+    cur = cur.convert("RGB")
+    w, h = cur.size
+    a = np.asarray(cur, np.float32)
+    hb = max(4, min(h, round(h * 0.08)))
+    band = a[:hb]
+    # profil de couleur par colonne, pondéré vers le bord, puis très lissé horizontalement
+    wts = np.exp(-np.arange(hb, dtype=np.float32) / max(1.0, hb / 3))[:, None, None]
+    prof = (band * wts).sum(0) / wts.sum()
+    sig = max(2.0, w * 0.04)
+    x = np.arange(-int(3 * sig), int(3 * sig) + 1, dtype=np.float32)
+    ker = np.exp(-x ** 2 / (2 * sig ** 2))
+    ker /= ker.sum()
+    pad = len(x) // 2
+    prof = np.stack([np.convolve(np.pad(prof[:, c], pad, mode="reflect" if w > pad else "edge"), ker, "valid")
+                     for c in range(3)], 1)
+    far = np.median(band.reshape(-1, 3), axis=0)
+    d = np.arange(amount, 0, -1, dtype=np.float32)[:, None, None]  # distance au bord
+    t = 1 - np.exp(-d / max(8.0, h * 0.25))
+    top = prof[None] * (1 - t) + far[None, None] * t
+    g = _noise_sigma(band)
+    if g > 0.3:
+        top = top + _grain((amount, w), g, seed)[:, :, None]
+    out = Image.new("RGB", (w, h + amount))
+    out.paste(Image.fromarray(top.clip(0, 255).astype(np.uint8)), (0, 0))
+    out.paste(cur, (0, amount))
+    return out
+
+
+def smooth_fill(img: Image.Image, size: tuple[int, int], ox: int, oy: int) -> Image.Image:
+    """Fond généré sans étirement (rapide, hors ligne), voir _smooth_extend_top."""
+    w, h = img.size
+    nw, nh = size
+    pads = {"top": oy, "bottom": nh - h - oy, "left": ox, "right": nw - w - ox}
+    cur = img.convert("RGB")
+    for i, side in enumerate(("top", "bottom", "left", "right")):
+        if pads[side] <= 0:
+            continue
+        before, after = _ROT[side]
+        if before is not None:
+            cur = cur.transpose(before)
+        cur = _smooth_extend_top(cur, pads[side], seed=i)
+        if after is not None:
+            cur = cur.transpose(after)
+    return _composite_original(cur, img, ox, oy, feather=0.06)
+
+
+def _is_plain(img: Image.Image, ox: int, oy: int, size: tuple[int, int]) -> bool:
+    """Vrai si les bords à prolonger sont un fond quasi uni (studio, mur…) :
+    le fond généré lisse y est plus propre que l'IA."""
+    import numpy as np
+
+    w, h = img.size
+    nw, nh = size
+    a = np.asarray(img.convert("RGB").resize((min(w, 512), min(h, 512)), Image.BOX), np.float32)
+    a = np.asarray(Image.fromarray(a.astype(np.uint8)).filter(ImageFilter.GaussianBlur(2)), np.float32)
+    hh, ww = a.shape[:2]
+    k = max(2, round(min(hh, ww) * 0.08))
+    bands = []
+    if oy > 0:
+        bands.append(a[:k])
+    if oy + h < nh:
+        bands.append(a[-k:])
+    if ox > 0:
+        bands.append(a[:, :k])
+    if ox + w < nw:
+        bands.append(a[:, -k:])
+    if not bands:
+        return False
+    # variation lente le long du bord autorisée (dégradé), mais pas de motif
+    for b in bands:
+        b = b if b.shape[0] <= b.shape[1] else b.transpose(1, 0, 2)
+        col = b.mean(axis=0)
+        if float(np.abs(np.diff(col, axis=0)).mean()) > 1.5 or float((b - col[None]).std()) > 6:
+            return False
+    return True
 
 
 _ROT = {"top": (None, None), "bottom": (Image.ROTATE_180, Image.ROTATE_180),
@@ -211,10 +316,17 @@ _ROT = {"top": (None, None), "bottom": (Image.ROTATE_180, Image.ROTATE_180),
 
 
 def outpaint_local(img: Image.Image, size: tuple[int, int], ox: int, oy: int) -> Image.Image:
+    import numpy as np
+
     w, h = img.size
     nw, nh = size
+    if _is_plain(img, ox, oy, size):
+        return smooth_fill(img, size, ox, oy)
     f = min(1.0, WORK_MAX / max(nw, nh))
     small = img.convert("RGB").resize((max(1, round(w * f)), max(1, round(h * f))), Image.LANCZOS)
+    grain = _noise_sigma(np.asarray(small, np.float32))
+    # débruitage : les artefacts de compression ne doivent pas être recopiés par l'IA
+    small = small.filter(ImageFilter.MedianFilter(3)).filter(ImageFilter.GaussianBlur(0.8))
     pads = {"top": round(oy * f), "bottom": round((nh - h - oy) * f),
             "left": round(ox * f), "right": round((nw - w - ox) * f)}
     cur = small
@@ -227,7 +339,11 @@ def outpaint_local(img: Image.Image, size: tuple[int, int], ox: int, oy: int) ->
         cur = _extend_top(cur, pads[side])
         if after is not None:
             cur = cur.transpose(after)
-    return _composite_original(cur.resize((nw, nh), Image.LANCZOS), img, ox, oy)
+    big = cur.resize((nw, nh), Image.LANCZOS)
+    if grain > 0.3:
+        n = _grain((nh, nw), grain, 0)
+        big = Image.fromarray((np.asarray(big, np.float32) + n[:, :, None]).clip(0, 255).astype(np.uint8))
+    return _composite_original(big, img, ox, oy)
 
 
 # --------------------------------------------------------------------------- #

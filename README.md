@@ -49,6 +49,10 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
   simples) et « IA OpenAI » (meilleure sur les décors complexes ; nécessite une clé API créée sur
   platform.openai.com, payante à l'usage, et les images sont envoyées à OpenAI). Dans les deux cas,
   les pixels d'origine sont conservés à l'identique : seule la zone ajoutée est générée.
+  Par défaut, le fond ajouté est **généré** (« Fond généré propre ») : la couleur du bord est
+  lissée puis prolongée avec un grain neutre, sans recopier les pixels, donc sans stries ni
+  défauts de compression. L'IA locale l'utilise aussi automatiquement sur les fonds unis ;
+  sur un décor (carrelage, bois, extérieur), elle débruite l'image avant d'agrandir.
   En position « Auto », l'app détecte par la couleur des bords si le produit touche le haut ou
   le bas (ou un côté) de l'image, et ajoute le fond uniquement du côté opposé.
   Si la détection se trompe sur une image, choisissez « Pour cette image » (haut, bas, centré…) :
