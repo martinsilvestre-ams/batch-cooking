@@ -208,3 +208,14 @@ def test_transparent_bg_with_pad_ai_stays_transparent():
                    pad_enabled=True, pad_ratio=(1, 1), pad_fill="ai_local")
     out = P.process(img, s, mask_fn=lambda _im: mask)  # aucun appel IA nécessaire
     assert out.size == (200, 200) and out.mode == "RGBA" and out.getpixel((5, 5))[3] == 0
+
+
+def test_auto_position_with_large_product_at_bottom():
+    # Produit qui occupe toute la largeur et la majeure partie des côtés :
+    # le fond doit être estimé sur le bord du haut, et ajouté en haut.
+    img = Image.new("RGB", (400, 300), (245, 245, 245))
+    prod = Image.linear_gradient("L").rotate(90).resize((400, 230)).point(lambda v: 20 + v // 2).convert("RGB")
+    img.paste(prod, (0, 70))
+    assert P.estimate_background(img) == (245, 245, 245)
+    ox, oy, why = P.pad_offsets(img, (400, 400), "auto")
+    assert (ox, oy) == (0, 100) and "haut" in why

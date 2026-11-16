@@ -174,15 +174,25 @@ def padded_size(size: tuple[int, int], ratio: tuple[int, int]) -> tuple[int, int
 
 
 def estimate_background(img: Image.Image) -> tuple[int, int, int]:
-    """Couleur de fond estimée : médiane des pixels du pourtour de l'image."""
+    """Couleur de fond estimée à partir du bord le plus uniforme de l'image.
+
+    Prendre la médiane de tout le pourtour se trompe quand le produit occupe une
+    grande partie d'un bord ; le bord le plus homogène est presque toujours du fond."""
+    import numpy as np
+
     small = img.convert("RGB")
     small.thumbnail((256, 256))
-    w, h = small.size
+    a = np.asarray(small, dtype=np.int16)
+    h, w = a.shape[:2]
     b = max(1, round(min(w, h) * 0.03))
-    strips = [small.crop((0, 0, w, b)), small.crop((0, h - b, w, h)),
-              small.crop((0, 0, b, h)), small.crop((w - b, 0, w, h))]
-    px = [p for st in strips for p in st.getdata()]
-    return tuple(sorted(c[i] for c in px)[len(px) // 2] for i in range(3))  # type: ignore[return-value]
+    strips = [a[:b].reshape(-1, 3), a[-b:].reshape(-1, 3), a[:, :b].reshape(-1, 3), a[:, -b:].reshape(-1, 3)]
+    best = None
+    for st in strips:
+        med = np.median(st, axis=0)
+        spread = float(np.median(np.abs(st - med).max(axis=1)))
+        if best is None or spread < best[0]:
+            best = (spread, med)
+    return tuple(int(round(c)) for c in best[1])  # type: ignore[return-value]
 
 
 def edge_contact(img: Image.Image, tol: int = 40) -> dict:

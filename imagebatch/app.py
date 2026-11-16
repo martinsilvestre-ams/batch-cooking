@@ -278,9 +278,11 @@ class ExportThread(QThread):
     progress = Signal(int, str)
     done = Signal(int, list)
 
-    def __init__(self, files: list[Path], out_dir: Path, settings: P.Settings):
+    def __init__(self, files: list[Path], out_dir: Path, settings: P.Settings,
+                 overrides: dict | None = None):
         super().__init__()
         self.files, self.out_dir, self.settings = files, out_dir, settings
+        self.overrides = overrides or {}
         self.cancelled = False
 
     def run(self):
@@ -303,7 +305,9 @@ class ExportThread(QThread):
                 break
             self.progress.emit(i, f.name)
             try:
-                P.process_file(f, self.out_dir, self.settings)
+                o = self.overrides.get(str(f))
+                s = P.Settings(**{**self.settings.__dict__, **o}) if o else self.settings
+                P.process_file(f, self.out_dir, s)
                 ok += 1
             except Exception as exc:  # on continue avec les suivantes
                 errors.append(f"{f.name} : {exc}")
@@ -323,6 +327,7 @@ class MainWindow(QMainWindow):
         self.qsettings = QSettings("ImageBatch", "ImageBatch")
         self.preview_src: Image.Image | None = None
         self.preview_path: Path | None = None
+        self.overrides: dict[str, dict] = {}  # réglages propres à une image (chemin -> champs Settings)
         self.thread: ExportThread | None = None
         self.mask_cache: dict = {}
         self.mask_threads: list = []
@@ -524,7 +529,19 @@ class MainWindow(QMainWindow):
         self.pad_position.setToolTip("Auto détecte si le produit touche le haut ou le bas (ou un côté)\n"
                                      "par la couleur des bords, et ajoute le fond uniquement à l'opposé.")
         self.pad_position.currentIndexChanged.connect(self.refresh_preview)
-        f.addRow("Ajouter le fond", self.pad_position)
+        f.addRow("Ajouter le fond (lot)", self.pad_position)
+        self.pad_position_img = QComboBox()
+        self.pad_position_img.addItem("Comme le lot", None)
+        for label, key in [("Auto : côté opposé au produit", "auto"), ("Des deux côtés (centré)", "center"),
+                           ("En haut / à gauche", "start"), ("En bas / à droite", "end")]:
+            self.pad_position_img.addItem(label, key)
+        self.pad_position_img.setToolTip("Réglage propre à l'image sélectionnée (ou aux images sélectionnées),\n"
+                                         "prioritaire sur le réglage du lot. Les images concernées sont marquées ✎.")
+        self.pad_position_img.currentIndexChanged.connect(self._on_image_position)
+        f.addRow("Pour cette image", self.pad_position_img)
+        self.clear_overrides_btn = QPushButton("Remettre toutes les images comme le lot")
+        self.clear_overrides_btn.clicked.connect(self.clear_overrides)
+        f.addRow(self.clear_overrides_btn)
         self.pad_color = QColor(255, 255, 255)
         self.pad_color_btn = QPushButton()
         self.pad_color_btn.clicked.connect(self._choose_pad_color)
@@ -542,7 +559,8 @@ class MainWindow(QMainWindow):
         self.ai_openai_cb.toggled.connect(lambda on: self._on_ai_toggled(self.ai_openai_cb, on))
         f.addRow(self.ai_local_cb)
         f.addRow(self.ai_openai_cb)
-        self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_color_btn, self.pad_blur,
+        self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_position_img,
+                            self.clear_overrides_btn, self.pad_color_btn, self.pad_blur,
                             self.ai_local_cb, self.ai_openai_cb]
         v.addWidget(g)
 
@@ -687,6 +705,45 @@ class MainWindow(QMainWindow):
             m.addAction(a)
 
     # ---------- réglages ----------
+    def settings_for(self, path) -> P.Settings:
+        """Réglages du lot, complétés par ceux propres à l'image."""
+        s = self.current_settings()
+        o = self.overrides.get(str(path)) if path is not None else None
+        return P.Settings(**{**s.__dict__, **o}) if o else s
+
+    def _on_image_position(self, *_):
+        if self.preview_path is None:
+            return
+        value = self.pad_position_img.currentData()
+        items = self.list.selectedItems() or [self.list.currentItem()]
+        for item in items:
+            if item is None:
+                continue
+            key = item.data(Qt.UserRole)
+            if value is None:
+                self.overrides.pop(key, None)
+            else:
+                self.overrides[key] = {"pad_position": value}
+            self._mark_item(item)
+        self.refresh_preview()
+
+    def _mark_item(self, item):
+        name = Path(item.data(Qt.UserRole)).name
+        item.setText(name + ("  ✎" if item.data(Qt.UserRole) in self.overrides else ""))
+
+    def _sync_image_position(self):
+        o = self.overrides.get(str(self.preview_path), {}) if self.preview_path else {}
+        self.pad_position_img.blockSignals(True)
+        self.pad_position_img.setCurrentIndex(max(0, self.pad_position_img.findData(o.get("pad_position"))))
+        self.pad_position_img.blockSignals(False)
+
+    def clear_overrides(self):
+        self.overrides.clear()
+        for i in range(self.list.count()):
+            self._mark_item(self.list.item(i))
+        self._sync_image_position()
+        self.refresh_preview()
+
     def current_settings(self) -> P.Settings:
         ratio = self.crop_ratio.currentData()
         return P.Settings(
@@ -852,7 +909,7 @@ class MainWindow(QMainWindow):
     def _start_ai_preview(self, *_):
         if self.preview_src is None:
             return
-        s = P.Settings(**{**self.current_settings().__dict__, "resize_mode": "none"})
+        s = P.Settings(**{**self.settings_for(self.preview_path).__dict__, "resize_mode": "none"})
         mask_fn = None
         if s.bg_enabled:
             mask_fn = self._preview_mask_fn(s)
@@ -1001,6 +1058,7 @@ class MainWindow(QMainWindow):
 
     def remove_selected(self):
         for item in self.list.selectedItems():
+            self.overrides.pop(item.data(Qt.UserRole), None)
             self.list.takeItem(self.list.row(item))
         self._update_count()
         if not self.list.count():
@@ -1008,6 +1066,7 @@ class MainWindow(QMainWindow):
 
     def clear_files(self):
         self.list.clear()
+        self.overrides.clear()
         self._update_count()
         self._clear_preview()
 
@@ -1047,6 +1106,7 @@ class MainWindow(QMainWindow):
                 im.thumbnail((PREVIEW_MAX, PREVIEW_MAX))
                 self.preview_src = im.copy()
                 self.preview_path = path
+                self._sync_image_position()
         except Exception as exc:
             self.preview_src = None
             self.preview.message = f"Impossible d'ouvrir {path.name} : {exc}"
@@ -1068,7 +1128,7 @@ class MainWindow(QMainWindow):
     def refresh_preview(self, *_):
         if not hasattr(self, "preview") or not hasattr(self, "export_btn"):
             return
-        s = self.current_settings()
+        s = self.settings_for(self.preview_path)
         self._update_section_markers(s)
         manual = s.crop_mode == "manual"
         self.preview.edit_crop = manual and not self.compare.isChecked()
@@ -1103,7 +1163,7 @@ class MainWindow(QMainWindow):
     def refresh_info(self):
         if self.preview_src is None:
             return
-        s = self.current_settings()
+        s = self.settings_for(self.preview_path)
         ow, oh = self.orig_size
         nw, nh = P.output_size((ow, oh), s)
         out = f"{nw}×{nh} px" if nw else "taille selon le sujet"
@@ -1137,7 +1197,7 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.export_btn.setEnabled(False)
         self.cancel_btn.setVisible(True)
-        self.thread = ExportThread(files, out, s)
+        self.thread = ExportThread(files, out, s, dict(self.overrides))
         self.thread.progress.connect(self._on_progress)
         self.thread.done.connect(self._on_done)
         self.thread.start()

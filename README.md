@@ -51,6 +51,9 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
   les pixels d'origine sont conservés à l'identique : seule la zone ajoutée est générée.
   En position « Auto », l'app détecte par la couleur des bords si le produit touche le haut ou
   le bas (ou un côté) de l'image, et ajoute le fond uniquement du côté opposé.
+  Si la détection se trompe sur une image, choisissez « Pour cette image » (haut, bas, centré…) :
+  ce réglage ne concerne que l'image sélectionnée (ou les images sélectionnées), marquée ✎ dans
+  la liste, et prend le pas sur le réglage du lot à l'export.
 - **Redimensionnement** : largeur fixe, hauteur fixe, tenir dans un cadre, dimensions exactes,
   pourcentage, avec option « ne jamais agrandir ».
 - **Retouches** : rotation, miroirs, luminosité, contraste, saturation, netteté, noir et blanc.
