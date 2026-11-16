@@ -323,6 +323,35 @@ class AiPreviewThread(QThread):
             self.failed.emit(self.key, str(exc))
 
 
+PAD_TAGS = {"fond ajouté en haut": "fond ↑", "fond ajouté en bas": "fond ↓", "fond ajouté à gauche": "fond ←",
+            "fond ajouté à droite": "fond →", "fond ajouté des deux côtés": "fond ↕"}
+
+
+class DetectThread(QThread):
+    """Calcule, pour chaque image du lot, de quel côté le fond sera ajouté."""
+    found = Signal(int, str, str)  # génération, chemin, étiquette
+
+    def __init__(self, gen: int, jobs: list):
+        super().__init__()
+        self.gen, self.jobs, self.cancelled = gen, jobs, False
+
+    def run(self):
+        for path, s in self.jobs:
+            if self.cancelled:
+                return
+            try:
+                with Image.open(path) as im:
+                    im.draft("RGB", (512, 512))
+                    im = ImageOps.exif_transpose(im)
+                    im.thumbnail((400, 400))
+                    info: dict = {}
+                    P.process(im.convert("RGB"), s, None, info)
+                tag = info.get("pad", "")
+            except Exception:
+                tag = ""
+            self.found.emit(self.gen, path, tag)
+
+
 class ExportThread(QThread):
     progress = Signal(int, str)
     done = Signal(int, list)
@@ -386,6 +415,14 @@ class MainWindow(QMainWindow):
         self.ai_cache: dict = {}
         self.ai_threads: list = []
         self.ai_pending = None
+        self.detect_tags: dict = {}  # chemin -> côté où le fond est ajouté
+        self.detect_gen = 0
+        self.detect_thread = None
+        self.detect_threads: list = []
+        self.detect_timer = QTimer(self)
+        self.detect_timer.setSingleShot(True)
+        self.detect_timer.setInterval(400)
+        self.detect_timer.timeout.connect(self._run_detection)
 
         splitter = QSplitter()
         splitter.addWidget(self._build_file_panel())
@@ -865,8 +902,42 @@ class MainWindow(QMainWindow):
         self._set_retouches(())
 
     def _mark_item(self, item):
-        name = Path(item.data(Qt.UserRole)).name
-        item.setText(name + ("  ✎" if item.data(Qt.UserRole) in self.overrides else ""))
+        key = item.data(Qt.UserRole)
+        tag = PAD_TAGS.get(self.detect_tags.get(key, ""), "")
+        item.setText(Path(key).name + (f"   {tag}" if tag else "") + ("  ✎" if key in self.overrides else ""))
+
+    def _run_detection(self):
+        """Affiche dans la liste le côté où le fond sera ajouté, calculé image par image."""
+        if self.detect_thread is not None:
+            self.detect_thread.cancelled = True
+        self.detect_gen += 1
+        if not self.current_settings().pad_enabled:
+            self.detect_tags.clear()
+            for i in range(self.list.count()):
+                self._mark_item(self.list.item(i))
+            return
+        jobs = []
+        for i in range(self.list.count()):
+            key = self.list.item(i).data(Qt.UserRole)
+            s = self.settings_for(key)
+            jobs.append((key, P.Settings(**{**s.__dict__, "bg_enabled": False, "retouch": (),
+                                            "pad_fill": "color", "resize_mode": "none"})))
+        th = DetectThread(self.detect_gen, jobs)
+        th.found.connect(self._on_detected)
+        th.finished.connect(lambda th=th: self.detect_threads.remove(th) if th in self.detect_threads else None)
+        self.detect_threads.append(th)
+        self.detect_thread = th
+        th.start()
+
+    def _on_detected(self, gen, path, tag):
+        if gen != self.detect_gen:
+            return
+        self.detect_tags[path] = tag
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.data(Qt.UserRole) == path:
+                self._mark_item(item)
+                break
 
     def _sync_image_position(self):
         o = self.overrides.get(str(self.preview_path), {}) if self.preview_path else {}
@@ -1289,6 +1360,7 @@ class MainWindow(QMainWindow):
     def refresh_preview(self, *_):
         if not hasattr(self, "preview") or not hasattr(self, "export_btn"):
             return
+        self.detect_timer.start()  # recalcule en tâche de fond le côté détecté de chaque image
         s = self.settings_for(self.preview_path)
         self._update_section_markers(s)
         manual = s.crop_mode == "manual"
