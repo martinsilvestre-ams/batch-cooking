@@ -75,3 +75,21 @@ def test_pad_ratio_fills(tmp_path):
     dst = P.process_file(src, tmp_path / "out", s)
     with Image.open(dst) as im:
         assert im.size == (400, 711)
+
+
+def test_replace_background_with_given_mask(tmp_path):
+    from PIL import ImageDraw
+    img = Image.new("RGB", (200, 100), (10, 200, 10))
+    mask = Image.new("L", (200, 100), 0)
+    ImageDraw.Draw(mask).rectangle([80, 30, 119, 69], fill=255)
+    s = P.Settings(bg_enabled=True, bg_fill="color", bg_color=(0, 0, 255), bg_feather=0,
+                   bg_trim=True, bg_margin=0)
+    out = P.process(img, s, mask_fn=lambda _im: mask)
+    assert out.size == (40, 40)
+    assert out.getpixel((20, 20)) == (10, 200, 10)
+    s.bg_trim = False
+    out = P.process(img, s, mask_fn=lambda _im: mask)
+    assert out.size == (200, 100) and out.getpixel((2, 2)) == (0, 0, 255)
+    s.bg_fill = "transparent"
+    out = P.process(img, s, mask_fn=lambda _im: mask)
+    assert out.mode == "RGBA" and out.getpixel((2, 2))[3] == 0

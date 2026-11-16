@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QStatusBar, QVBoxLayout, QWidget,
 )
 
+from . import background as BG
 from . import processing as P
 
 PREVIEW_MAX = 1400  # taille max de l'image utilisée pour l'aperçu
@@ -163,6 +164,32 @@ class PreviewWidget(QWidget):
 
 
 # --------------------------------------------------------------------------- #
+# Détourage de l'aperçu en tâche de fond
+# --------------------------------------------------------------------------- #
+class MaskThread(QThread):
+    status = Signal(str)
+    done = Signal(object, object)  # clé, masque (ou None)
+    failed = Signal(object, str)
+
+    def __init__(self, img: Image.Image, s: P.Settings, key):
+        super().__init__()
+        self.img, self.s, self.key = img, s, key
+
+    def run(self):
+        try:
+            if not BG.is_downloaded(self.s.bg_model):
+                def prog(done, total):
+                    pct = f" {done * 100 // total} %" if total else ""
+                    self.status.emit(f"Téléchargement du modèle de détourage (une seule fois){pct}…")
+                BG.download(self.s.bg_model, prog)
+            self.status.emit("Détourage en cours…")
+            img = P._geometry(P._crop(self.img, self.s), self.s)
+            self.done.emit(self.key, BG.compute_mask(img, self.s.bg_model))
+        except Exception as exc:
+            self.failed.emit(self.key, str(exc))
+
+
+# --------------------------------------------------------------------------- #
 # Export en tâche de fond
 # --------------------------------------------------------------------------- #
 class ExportThread(QThread):
@@ -176,6 +203,13 @@ class ExportThread(QThread):
 
     def run(self):
         errors, ok = [], 0
+        if self.settings.bg_enabled and not BG.is_downloaded(self.settings.bg_model):
+            try:
+                BG.download(self.settings.bg_model,
+                            lambda d, t: self.progress.emit(0, f"modèle de détourage ({d * 100 // max(t, 1)} %)"))
+            except Exception as exc:
+                self.done.emit(0, [f"Téléchargement du modèle impossible : {exc}"])
+                return
         for i, f in enumerate(self.files):
             if self.cancelled:
                 break
@@ -202,6 +236,9 @@ class MainWindow(QMainWindow):
         self.preview_src: Image.Image | None = None
         self.preview_path: Path | None = None
         self.thread: ExportThread | None = None
+        self.mask_cache: dict = {}
+        self.mask_threads: list = []
+        self.mask_pending = None
 
         splitter = QSplitter()
         splitter.addWidget(self._build_file_panel())
@@ -226,6 +263,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self._build_menu()
         self._update_crop_ui()
+        self._update_bg_ui()
         self._update_pad_ui()
         self._update_resize_ui()
 
@@ -301,6 +339,54 @@ class MainWindow(QMainWindow):
         self.crop_reset.clicked.connect(self._reset_crop)
         f.addRow(self.crop_hint)
         f.addRow(self.crop_reset)
+        v.addWidget(g)
+
+        # Remplacement du fond
+        g = QGroupBox("Remplacer le fond (détourage)")
+        f = QFormLayout(g)
+        self.bg_enabled = QCheckBox("Activer")
+        self.bg_enabled.toggled.connect(self._update_bg_ui)
+        f.addRow(self.bg_enabled)
+        self.bg_model = QComboBox()
+        for key, m in BG.MODELS.items():
+            self.bg_model.addItem(m[0], key)
+        self.bg_model.currentIndexChanged.connect(self.refresh_preview)
+        f.addRow("Modèle", self.bg_model)
+        self.bg_fill = QComboBox()
+        for label, key in [("Transparent", "transparent"), ("Couleur unie", "color"),
+                           ("Image…", "image"), ("Original flouté", "blur")]:
+            self.bg_fill.addItem(label, key)
+        self.bg_fill.currentIndexChanged.connect(self._update_bg_ui)
+        f.addRow("Nouveau fond", self.bg_fill)
+        self.bg_color = QColor(255, 255, 255)
+        self.bg_color_btn = QPushButton()
+        self.bg_color_btn.clicked.connect(self._choose_bg_color)
+        self.bg_color_label = QLabel("Couleur")
+        f.addRow(self.bg_color_label, self.bg_color_btn)
+        self.bg_image_btn = QPushButton("Choisir une image de fond…")
+        self.bg_image_btn.clicked.connect(self._choose_bg_image)
+        self.bg_image_path = ""
+        self.bg_image_label = QLabel("Image")
+        f.addRow(self.bg_image_label, self.bg_image_btn)
+        self.bg_feather = QSlider(Qt.Horizontal)
+        self.bg_feather.setRange(0, 10)
+        self.bg_feather.setValue(1)
+        self.bg_feather.valueChanged.connect(self.refresh_preview)
+        f.addRow("Adoucir le contour", self.bg_feather)
+        trim_row = QHBoxLayout()
+        self.bg_trim = QCheckBox("Recadrer sur le sujet, marge")
+        self.bg_trim.toggled.connect(self.refresh_preview)
+        self.bg_margin = QSpinBox(); self.bg_margin.setRange(0, 100); self.bg_margin.setValue(10)
+        self.bg_margin.setSuffix(" %")
+        self.bg_margin.valueChanged.connect(self.refresh_preview)
+        trim_row.addWidget(self.bg_trim)
+        trim_row.addWidget(self.bg_margin)
+        f.addRow(trim_row)
+        self.bg_status = QLabel("")
+        self.bg_status.setWordWrap(True)
+        f.addRow(self.bg_status)
+        self.bg_widgets = [self.bg_model, self.bg_fill, self.bg_color_btn, self.bg_image_btn,
+                           self.bg_feather, self.bg_trim, self.bg_margin]
         v.addWidget(g)
 
         # Changement de ratio avec ajout de fond
@@ -450,6 +536,14 @@ class MainWindow(QMainWindow):
             crop_mode=self.crop_mode.currentData(),
             crop_ratio=tuple(ratio) if ratio else (1, 1),
             crop_rect=self.preview.crop,
+            bg_enabled=self.bg_enabled.isChecked(),
+            bg_model=self.bg_model.currentData(),
+            bg_fill=self.bg_fill.currentData(),
+            bg_color=(self.bg_color.red(), self.bg_color.green(), self.bg_color.blue()),
+            bg_image=self.bg_image_path,
+            bg_feather=self.bg_feather.value(),
+            bg_trim=self.bg_trim.isChecked(),
+            bg_margin=self.bg_margin.value(),
             pad_enabled=self.pad_enabled.isChecked(),
             pad_ratio=tuple(self.pad_ratio.currentData()),
             pad_fill=self.pad_fill.currentData(),
@@ -490,6 +584,76 @@ class MainWindow(QMainWindow):
     def _reset_crop(self):
         self.preview.crop = (0.0, 0.0, 1.0, 1.0)
         self.refresh_preview()
+
+    def _update_bg_ui(self):
+        on = self.bg_enabled.isChecked()
+        err = BG.available() if on else None
+        for w in self.bg_widgets:
+            w.setEnabled(on and not err)
+        fill = self.bg_fill.currentData()
+        for wdg, vis in [(self.bg_color_btn, fill == "color"), (self.bg_color_label, fill == "color"),
+                         (self.bg_image_btn, fill == "image"), (self.bg_image_label, fill == "image")]:
+            wdg.setVisible(vis)
+        self.bg_color_btn.setText(self.bg_color.name().upper())
+        self.bg_color_btn.setStyleSheet(
+            f"background:{self.bg_color.name()}; color:{'#000' if self.bg_color.lightness() > 128 else '#fff'};")
+        if err:
+            self.bg_status.setText(err)
+        elif on and not BG.is_downloaded(self.bg_model.currentData()):
+            self.bg_status.setText("Le modèle sera téléchargé au premier usage (une seule fois).")
+        else:
+            self.bg_status.setText("")
+        self.refresh_preview()
+
+    def _choose_bg_color(self):
+        c = QColorDialog.getColor(self.bg_color, self, "Couleur du nouveau fond")
+        if c.isValid():
+            self.bg_color = c
+            self._update_bg_ui()
+
+    def _choose_bg_image(self):
+        exts = " ".join(f"*{e}" for e in sorted(P.INPUT_EXTENSIONS))
+        f, _ = QFileDialog.getOpenFileName(self, "Image de fond", self.qsettings.value("in_dir", str(Path.home())),
+                                           f"Images ({exts})")
+        if f:
+            self.bg_image_path = f
+            self.bg_image_btn.setText(Path(f).name)
+            self.refresh_preview()
+
+    def _mask_key(self, s: P.Settings):
+        return (str(self.preview_path), s.bg_model, s.crop_mode, s.crop_ratio, s.crop_rect,
+                s.rotate, s.flip_h, s.flip_v)
+
+    def _preview_mask_fn(self, s: P.Settings):
+        """Renvoie une fonction masque si le masque est prêt, sinon lance le calcul."""
+        key = self._mask_key(s)
+        if key in self.mask_cache:
+            mask = self.mask_cache[key]
+            return lambda _img: mask
+        if self.mask_pending != key and BG.available() is None:
+            self.mask_pending = key
+            th = MaskThread(self.preview_src, s, key)
+            th.status.connect(self.bg_status.setText)
+            th.done.connect(self._on_mask_done)
+            th.failed.connect(self._on_mask_failed)
+            th.finished.connect(lambda th=th: self.mask_threads.remove(th) if th in self.mask_threads else None)
+            self.mask_threads.append(th)
+            th.start()
+        return None
+
+    def _on_mask_done(self, key, mask):
+        if len(self.mask_cache) > 30:
+            self.mask_cache.clear()
+        self.mask_cache[key] = mask
+        if self.mask_pending == key:
+            self.mask_pending = None
+        self.bg_status.setText("")
+        self.refresh_preview()
+
+    def _on_mask_failed(self, key, msg):
+        if self.mask_pending == key:
+            self.mask_pending = None
+        self.bg_status.setText(f"Échec du détourage : {msg}")
 
     def _update_pad_ui(self):
         on = self.pad_enabled.isChecked()
@@ -656,7 +820,12 @@ class MainWindow(QMainWindow):
             img = self.preview_src
         else:
             preview_s = P.Settings(**{**s.__dict__, "resize_mode": "none"})
-            img = P.process(self.preview_src, preview_s)
+            mask_fn = None
+            if s.bg_enabled:
+                mask_fn = self._preview_mask_fn(s)
+                if mask_fn is None:  # masque pas encore prêt : aperçu sans détourage
+                    preview_s.bg_enabled = False
+            img = P.process(self.preview_src, preview_s, mask_fn)
         self.preview.set_image(QPixmap.fromImage(pil_to_qimage(img)),
                                self.preview_src.width / self.preview_src.height)
         self.refresh_info()
@@ -667,7 +836,8 @@ class MainWindow(QMainWindow):
         s = self.current_settings()
         ow, oh = self.orig_size
         nw, nh = P.output_size((ow, oh), s)
-        self.info.setText(f"{self.preview_path.name} — {ow}×{oh} → {nw}×{nh} px")
+        out = f"{nw}×{nh} px" if nw else "taille selon le sujet"
+        self.info.setText(f"{self.preview_path.name} — {ow}×{oh} → {out}")
 
     # ---------- export ----------
     def export(self):

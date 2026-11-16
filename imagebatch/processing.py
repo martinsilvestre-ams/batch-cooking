@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
 try:  # Prise en charge optionnelle des photos iPhone (HEIC)
     from pillow_heif import register_heif_opener
@@ -50,6 +50,16 @@ class Settings:
     crop_ratio: tuple[int, int] = (1, 1)
     # Rectangle manuel en coordonnées relatives (0..1) : x, y, largeur, hauteur
     crop_rect: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+
+    # Remplacement du fond (détourage)
+    bg_enabled: bool = False
+    bg_model: str = "isnet"  # "isnet" | "birefnet"
+    bg_fill: str = "transparent"  # "transparent" | "color" | "image" | "blur"
+    bg_color: tuple[int, int, int] = (255, 255, 255)
+    bg_image: str = ""
+    bg_feather: int = 1  # adoucissement du contour (pour 1000 px)
+    bg_trim: bool = False  # recadrer sur le sujet
+    bg_margin: int = 10  # marge autour du sujet, en % du plus grand côté
 
     # Changement de ratio en ajoutant du fond (sans recadrer)
     pad_enabled: bool = False
@@ -197,6 +207,62 @@ def _pad(img: Image.Image, s: Settings) -> Image.Image:
     return canvas.convert("RGB")
 
 
+def _cover(bg: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """Redimensionne bg pour couvrir size (comme background-size: cover)."""
+    w, h = size
+    scale = max(w / bg.width, h / bg.height)
+    nw, nh = max(w, round(bg.width * scale)), max(h, round(bg.height * scale))
+    bg = bg.resize((nw, nh), Image.LANCZOS)
+    left, top = (nw - w) // 2, (nh - h) // 2
+    return bg.crop((left, top, left + w, top + h))
+
+
+_bg_image_cache: dict = {}
+
+
+def _load_bg_image(path: str) -> Image.Image:
+    if path not in _bg_image_cache:
+        _bg_image_cache.clear()
+        _bg_image_cache[path] = load(path).convert("RGB")
+    return _bg_image_cache[path]
+
+
+def _replace_background(img: Image.Image, mask: Image.Image, s: Settings) -> Image.Image:
+    w, h = img.size
+    if s.bg_feather > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(s.bg_feather * max(w, h) / 1000))
+    src = img.convert("RGBA")
+    if img.mode in ("RGBA", "LA"):  # combine avec la transparence existante
+        mask = ImageChops.multiply(mask, src.getchannel("A"))
+
+    if s.bg_trim:
+        box = mask.point(lambda v: 255 if v > 24 else 0).getbbox()
+        if box:
+            m = round(max(box[2] - box[0], box[3] - box[1]) * s.bg_margin / 100)
+            box = (box[0] - m, box[1] - m, box[2] + m, box[3] + m)
+            src, mask = src.crop(box), mask.crop(box)  # hors image = transparent
+            img = img.convert("RGB").crop(box)
+            w, h = src.size
+
+    if s.bg_fill == "color":
+        canvas = Image.new("RGBA", (w, h), (*s.bg_color, 255))
+    elif s.bg_fill == "image" and s.bg_image:
+        canvas = _cover(_load_bg_image(s.bg_image), (w, h)).convert("RGBA")
+    elif s.bg_fill == "blur":
+        bg = img.convert("RGB")
+        f = min(1.0, 400 / max(w, h))
+        small = bg.resize((max(1, round(w * f)), max(1, round(h * f))), Image.BILINEAR)
+        small = small.filter(ImageFilter.GaussianBlur(max(2, 25 * f * max(w, h) / 1000)))
+        canvas = small.resize((w, h), Image.BICUBIC).convert("RGBA")
+    else:
+        canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+
+    subject = src.copy()
+    subject.putalpha(mask)
+    canvas.alpha_composite(subject)
+    return canvas
+
+
 def _enhance(img: Image.Image, s: Settings) -> Image.Image:
     # Les filtres ImageEnhance travaillent en RGB(A)/L
     if img.mode not in ("RGB", "RGBA", "L", "LA"):
@@ -224,11 +290,25 @@ def _enhance(img: Image.Image, s: Settings) -> Image.Image:
     return img
 
 
-def process(img: Image.Image, s: Settings) -> Image.Image:
-    """Ordre : recadrage -> rotation/miroir -> retouches -> ajout de fond -> redimensionnement."""
+def process(img: Image.Image, s: Settings, mask_fn=None) -> Image.Image:
+    """Ordre : recadrage -> rotation/miroir -> retouches -> remplacement du fond
+    -> ajout de fond (ratio) -> redimensionnement.
+
+    mask_fn(img) -> masque L ou None ; par défaut le détourage est calculé ici."""
     img = _crop(img, s)
     img = _geometry(img, s)
+    mask = None
+    if s.bg_enabled:
+        if mask_fn is None:
+            from .background import compute_mask
+            mask = compute_mask(img, s.bg_model)
+        else:
+            mask = mask_fn(img)
     img = _enhance(img, s)
+    if mask is not None:
+        img = _replace_background(img, mask, s)
+        if s.bg_fill in ("color", "image", "blur"):
+            img = img.convert("RGB")
     img = _pad(img, s)
     img = _resize(img, s)
     return img
@@ -289,12 +369,12 @@ def save(img: Image.Image, dst: Path, s: Settings, src_img: Image.Image | None =
     img.save(dst, fmt, **kwargs)
 
 
-def process_file(src: str | Path, out_dir: str | Path, s: Settings) -> Path:
+def process_file(src: str | Path, out_dir: str | Path, s: Settings, mask_fn=None) -> Path:
     src, out_dir = Path(src), Path(out_dir)
     original = Image.open(src)
     img = ImageOps.exif_transpose(original)
     img.load()
-    result = process(img, s)
+    result = process(img, s, mask_fn)
     dst = output_path(src, out_dir, s)
     save(result, dst, s, original)
     return dst
@@ -324,6 +404,8 @@ def output_size(size: tuple[int, int], s: Settings) -> tuple[int, int]:
             w, h = nw, nh
     if s.rotate in (90, 270):
         w, h = h, w
+    if s.bg_enabled and s.bg_trim:
+        return (0, 0)  # dépend du contenu : inconnu sans calculer le masque
     if s.pad_enabled:
         w, h = padded_size((w, h), s.pad_ratio)
     # Réutilise la logique de _resize sur une taille abstraite

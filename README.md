@@ -32,6 +32,12 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
   Formats lus : JPEG, PNG, WEBP, TIFF, BMP, GIF, et HEIC (photos iPhone).
 - **Recadrage** : centré selon un ratio (1:1, 4:3, 3:2, 16:9, 4:5, 2:3, 9:16), ou zone dessinée
   à la souris sur l'aperçu, appliquée à toutes les images (en proportions).
+- **Remplacer le fond (détourage)** : le sujet principal (produit, personne…) est détouré
+  automatiquement, en local, puis posé sur un nouveau fond : transparent, couleur unie, image de
+  votre choix, ou original flouté. Option « Recadrer sur le sujet » avec une marge, idéale avec
+  « Changer le ratio » pour des visuels produit carrés et centrés. Deux modèles : Rapide (ISNet)
+  et Précis (BiRefNet, plus lent). Le modèle est téléchargé une seule fois (170 à 220 Mo) dans
+  `~/Library/Application Support/ImageBatch/models`.
 - **Changer le ratio en ajoutant du fond** : l'image entière est conservée et la toile est agrandie
   au ratio voulu. Fond au choix : image floutée, couleur unie, bords étirés, ou transparent.
 - **Redimensionnement** : largeur fixe, hauteur fixe, tenir dans un cadre, dimensions exactes,
@@ -40,7 +46,7 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
 - **Export** : JPEG, PNG, WEBP, TIFF, BMP ou format d'origine, qualité réglable, suffixe de nom,
   conservation optionnelle de l'EXIF et du profil couleur. Les originaux ne sont jamais écrasés.
 
-Ordre d'application : recadrage → rotation/miroir → retouches → ajout de fond → redimensionnement.
+Ordre d'application : recadrage → rotation/miroir → retouches → remplacement du fond → ajout de fond (ratio) → redimensionnement.
 
 ## Développement
 
@@ -51,4 +57,5 @@ python main.py
 ```
 
 - `imagebatch/processing.py` : tout le traitement (sans interface, testable).
+- `imagebatch/background.py` : le détourage (modèles ONNX via onnxruntime).
 - `imagebatch/app.py` : l'interface.
