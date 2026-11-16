@@ -99,6 +99,7 @@ def _session(key: str):
                 pass
             opts = ort.SessionOptions()
             opts.log_severity_level = 3
+            opts.intra_op_num_threads = max(1, (os.cpu_count() or 2) - 2)  # garde l'interface fluide
             _sessions[key] = ort.InferenceSession(
                 str(download(key)), opts, providers=["CPUExecutionProvider"])
         return _sessions[key]

@@ -101,8 +101,11 @@ def _lama_session():
                 ort.disable_telemetry_events()
             except Exception:
                 pass
+            import os
+
             opts = ort.SessionOptions()
             opts.log_severity_level = 3
+            opts.intra_op_num_threads = max(1, (os.cpu_count() or 2) - 2)  # garde l'interface fluide
             _lama_sess = ort.InferenceSession(str(lama_download()), opts, providers=["CPUExecutionProvider"])
         return _lama_sess
 
@@ -128,6 +131,7 @@ def _extend_top(cur: Image.Image, amount: int) -> Image.Image:
     import numpy as np
 
     cur = cur.convert("RGB")
+    total = amount
     while amount > 0:
         w, h = cur.size
         win = max(64, min(w, int(h * 1.4)))
@@ -168,7 +172,30 @@ def _extend_top(cur: Image.Image, amount: int) -> Image.Image:
         new.paste(Image.fromarray(top), (0, 0))
         cur = new
         amount -= step
-    return cur
+    return _flatten_row_drift(cur, total)
+
+
+def _flatten_row_drift(cur: Image.Image, added: int) -> Image.Image:
+    """Supprime les bandes de teinte entre les passes de l'IA : la luminosité/couleur
+    moyenne de chaque ligne ajoutée est ramenée vers celle du bord d'origine.
+    Le décalage est lissé, donc les motifs fins (joints, rayures) sont conservés."""
+    import numpy as np
+
+    if added <= 0:
+        return cur
+    a = np.asarray(cur, np.float32).copy()
+    k = max(1, min(12, a.shape[0] - added))
+    target = a[added:added + k].mean(axis=(0, 1))
+    rows = a[:added].mean(axis=1)  # (added, 3)
+    off = rows - target
+    sigma = max(3.0, added * 0.03)
+    x = np.arange(-int(3 * sigma), int(3 * sigma) + 1, dtype=np.float32)
+    ker = np.exp(-x ** 2 / (2 * sigma ** 2))
+    ker /= ker.sum()
+    pad = len(x) // 2
+    sm = np.stack([np.convolve(np.pad(off[:, c], pad, mode="edge"), ker, mode="valid") for c in range(3)], 1)
+    a[:added] -= sm[:, None, :]
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
 
 
 _ROT = {"top": (None, None), "bottom": (Image.ROTATE_180, Image.ROTATE_180),

@@ -500,9 +500,7 @@ class MainWindow(QMainWindow):
         self.pad_fill = QComboBox()
         for label, key in [("Prolonger le bord de l'image", "edge"), ("Couleur du fond détectée", "auto_color"),
                            ("Couleur unie", "color"), ("Image floutée", "blur"),
-                           ("Transparent (PNG/WEBP)", "transparent"),
-                           ("IA locale (gratuite, hors ligne)", "ai_local"),
-                           ("IA OpenAI (clé API, payant)", "ai_openai")]:
+                           ("Transparent (PNG/WEBP)", "transparent")]:
             self.pad_fill.addItem(label, key)
         self.pad_fill.currentIndexChanged.connect(self._update_pad_ui)
         f.addRow("Fond", self.pad_fill)
@@ -525,6 +523,12 @@ class MainWindow(QMainWindow):
         self.pad_blur.valueChanged.connect(self.refresh_preview)
         self.pad_blur_label = QLabel("Intensité du flou")
         f.addRow(self.pad_blur_label, self.pad_blur)
+        self.ai_local_cb = QCheckBox("Agrandir avec l'IA locale (gratuite, hors ligne)")
+        self.ai_openai_cb = QCheckBox("Agrandir avec l'IA OpenAI (clé API, payant)")
+        self.ai_local_cb.toggled.connect(lambda on: self._on_ai_toggled(self.ai_local_cb, on))
+        self.ai_openai_cb.toggled.connect(lambda on: self._on_ai_toggled(self.ai_openai_cb, on))
+        f.addRow(self.ai_local_cb)
+        f.addRow(self.ai_openai_cb)
         self.openai_key = QLineEdit(self.qsettings.value("openai_key", ""))
         self.openai_key.setEchoMode(QLineEdit.Password)
         self.openai_key.setPlaceholderText("sk-… (platform.openai.com)")
@@ -544,7 +548,8 @@ class MainWindow(QMainWindow):
         self.ai_status.setWordWrap(True)
         f.addRow(self.ai_status)
         self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_color_btn, self.pad_blur,
-                            self.openai_key, self.openai_quality, self.ai_preview_btn]
+                            self.ai_local_cb, self.ai_openai_cb, self.openai_key, self.openai_quality,
+                            self.ai_preview_btn]
         v.addWidget(g)
 
         # Redimensionnement
@@ -683,7 +688,8 @@ class MainWindow(QMainWindow):
             bg_margin=self.bg_margin.value(),
             pad_enabled=self.pad_enabled.isChecked(),
             pad_ratio=tuple(self.pad_ratio.currentData()),
-            pad_fill=self.pad_fill.currentData(),
+            pad_fill=("ai_local" if self.ai_local_cb.isChecked() else
+                      "ai_openai" if self.ai_openai_cb.isChecked() else self.pad_fill.currentData()),
             pad_position=self.pad_position.currentData(),
             openai_key=self.openai_key.text().strip(),
             openai_quality=self.openai_quality.currentData(),
@@ -853,6 +859,14 @@ class MainWindow(QMainWindow):
         self.ai_cache[key] = None  # pas de nouvel essai automatique pour ces réglages
         self.ai_status.setText(f"Échec de l'IA : {msg}")
 
+    def _on_ai_toggled(self, box, on):
+        other = self.ai_openai_cb if box is self.ai_local_cb else self.ai_local_cb
+        if on and other.isChecked():
+            other.blockSignals(True)
+            other.setChecked(False)
+            other.blockSignals(False)
+        self._update_pad_ui()
+
     def _update_pad_ui(self):
         on = self.pad_enabled.isChecked()
         for w in self.pad_widgets:
@@ -862,16 +876,18 @@ class MainWindow(QMainWindow):
         self.pad_color_label.setVisible(fill == "color")
         self.pad_blur.setVisible(fill == "blur")
         self.pad_blur_label.setVisible(fill == "blur")
-        is_oa, is_ai = fill == "ai_openai", fill in ("ai_local", "ai_openai")
+        is_oa = self.ai_openai_cb.isChecked()
+        is_ai = is_oa or self.ai_local_cb.isChecked()
+        self.pad_fill.setEnabled(on and not is_ai)  # l'IA remplace le choix de fond
         for wdg in (self.openai_key, self.openai_key_label, self.openai_quality, self.openai_quality_label):
             wdg.setVisible(is_oa)
-        self.ai_preview_btn.setVisible(is_oa)
+        self.ai_preview_btn.setVisible(is_ai)
         self.ai_status.setVisible(is_ai)
         if is_oa:
             self.ai_status.setText("Images envoyées à OpenAI à l'export (≈ 0,05 à 0,20 € par image).")
         elif is_ai:
-            self.ai_status.setText("" if OP.lama_ready() else
-                                   "L'IA locale (92 Mo) sera téléchargée au premier usage.")
+            self.ai_status.setText("Aperçu IA sur demande (bouton ci-dessus) ; l'IA est appliquée à l'export."
+                                   + ("" if OP.lama_ready() else " Modèle de 92 Mo téléchargé au 1er usage."))
         self.pad_color_btn.setText(self.pad_color.name().upper())
         self.pad_color_btn.setStyleSheet(
             f"background:{self.pad_color.name()}; color:{'#000' if self.pad_color.lightness() > 128 else '#fff'};")
@@ -1047,7 +1063,7 @@ class MainWindow(QMainWindow):
                     preview_s.bg_enabled = False
             ai_fn = None
             if s.pad_enabled and s.pad_fill in ("ai_local", "ai_openai"):
-                ai_fn = self._preview_ai_fn(preview_s, mask_fn, auto=s.pad_fill == "ai_local")
+                ai_fn = self._preview_ai_fn(preview_s, mask_fn, auto=False)  # aperçu IA sur bouton
             self.preview_info = {}
             img = P.process(self.preview_src, preview_s, mask_fn, self.preview_info, ai_fn)
         self.preview.set_image(QPixmap.fromImage(pil_to_qimage(img)),
