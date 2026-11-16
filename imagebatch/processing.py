@@ -55,7 +55,7 @@ class Settings:
     # Remplacement du fond (détourage)
     bg_enabled: bool = False
     bg_model: str = "isnet"  # "isnet" | "birefnet"
-    bg_fill: str = "transparent"  # "transparent" | "color" | "image" | "blur"
+    bg_fill: str = "transparent"  # "transparent" | "color" | "studio" | "image" | "blur"
     bg_color: tuple[int, int, int] = (255, 255, 255)
     bg_image: str = ""
     bg_feather: int = 1  # adoucissement du contour (pour 1000 px)
@@ -63,6 +63,7 @@ class Settings:
     bg_margin: int = 10  # marge autour du sujet, en % du plus grand côté
     bg_ai: bool = False  # nouveau fond généré par l'IA OpenAI
     bg_prompt: str = ""  # description du nouveau fond
+    bg_shadow: int = 0  # ombre sous le produit, 0 (aucune) à 100
 
     # Changement de ratio en ajoutant du fond (sans recadrer)
     pad_enabled: bool = False
@@ -384,6 +385,8 @@ def _replace_background(img: Image.Image, mask: Image.Image, s: Settings) -> Ima
 
     if s.bg_fill == "color":
         canvas = Image.new("RGBA", (w, h), (*s.bg_color, 255))
+    elif s.bg_fill == "studio":
+        canvas = studio_background((w, h), s.bg_color).convert("RGBA")
     elif s.bg_fill == "image" and s.bg_image:
         canvas = _cover(_load_bg_image(s.bg_image), (w, h)).convert("RGBA")
     elif s.bg_fill == "blur":
@@ -395,10 +398,62 @@ def _replace_background(img: Image.Image, mask: Image.Image, s: Settings) -> Ima
     else:
         canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
+    if s.bg_shadow > 0:
+        canvas = _add_shadow(canvas, mask, s.bg_shadow / 100)
     subject = src.copy()
     subject.putalpha(mask)
     canvas.alpha_composite(subject)
     return canvas
+
+
+def studio_background(size: tuple[int, int], color: tuple[int, int, int]) -> Image.Image:
+    """Fond « studio » : la couleur choisie, plus claire au centre et en haut, qui
+    s'assombrit doucement vers les bords et le bas (comme un fond papier éclairé)."""
+    import numpy as np
+
+    w, h = size
+    sw, sh = max(2, min(w, 400)), max(2, min(h, 400))
+    y = np.linspace(0, 1, sh, dtype=np.float32)[:, None]
+    x = np.linspace(-1, 1, sw, dtype=np.float32)[None, :]
+    light = 1.06 - 0.10 * y ** 1.5                                  # plus sombre vers le bas
+    light = light - 0.07 * np.clip(x ** 2 + ((y - 0.4) * 1.3) ** 2 - 0.15, 0, None)  # vignettage doux
+    a = np.asarray(color, np.float32)[None, None, :] * light[:, :, None]
+    small = Image.fromarray(a.clip(0, 255).round().astype(np.uint8))
+    out = np.asarray(small.resize((w, h), Image.BICUBIC), np.float32)
+    out += np.random.default_rng(0).normal(0, 1.2, (h, w, 1)).astype(np.float32)  # évite les bandes
+    return Image.fromarray(out.clip(0, 255).round().astype(np.uint8))
+
+
+def _add_shadow(canvas: Image.Image, mask: Image.Image, strength: float) -> Image.Image:
+    """Ombre réaliste sous le produit, calculée à partir du détourage :
+    une ombre de contact sombre et nette sous la base, et une ombre portée douce."""
+    w, h = canvas.size
+    m = mask.point(lambda v: 255 if v > 100 else 0)
+    box = m.getbbox()
+    if not box:
+        return canvas
+    x0, y0, x1, y1 = box
+    bw, bh = x1 - x0, y1 - y0
+    size = max(bw, bh)
+    shadow = Image.new("L", (w, h), 0)
+    # ombre portée : la silhouette écrasée au sol, décalée vers le bas, très floue
+    flat_h = max(2, round(bh * 0.12))
+    flat = m.crop(box).resize((bw, flat_h), Image.BILINEAR)
+    shadow.paste(flat, (x0, y1 - flat_h // 2), flat)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(max(2, size * 0.035)))
+    soft = shadow.point(lambda v: int(v * 0.55))
+    # ombre de contact : la base de l'objet, peu floue
+    base = Image.new("L", (w, h), 0)
+    band = max(2, round(bh * 0.03))
+    base.paste(m.crop((x0, y1 - band, x1, y1)), (x0, y1 - band // 2))
+    base = base.filter(ImageFilter.GaussianBlur(max(1, size * 0.008)))
+    sh = ImageChops.lighter(soft, base.point(lambda v: int(v * 0.8)))
+    sh = sh.point(lambda v: int(v * min(1.0, strength)))
+    dark = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    dark.putalpha(sh)
+    out = canvas.copy()
+    out.alpha_composite(dark)
+    return out
 
 
 def _enhance(img: Image.Image, s: Settings) -> Image.Image:
@@ -445,7 +500,7 @@ def process(img: Image.Image, s: Settings, mask_fn=None, info: Optional[dict] = 
     img = _enhance(img, s)
     if mask is not None:
         img = _replace_background(img, mask, s)
-        if s.bg_ai or s.bg_fill in ("color", "image", "blur"):
+        if s.bg_ai or s.bg_fill in ("color", "studio", "image", "blur"):
             img = img.convert("RGB")
     img = _pad(img, s, info, ai_fn)
     if s.retouch:

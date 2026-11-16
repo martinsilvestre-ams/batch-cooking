@@ -38,7 +38,11 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
   « Changer le ratio » pour des visuels produit carrés et centrés. Deux modèles : Rapide (ISNet)
   et Précis (BiRefNet, plus lent). Le modèle est téléchargé une seule fois (170 à 220 Mo) dans
   `~/Library/Application Support/ImageBatch/models`.
-- **Nouveau fond créé par l'IA** : case « Créer le nouveau fond avec l'IA (OpenAI) » et une
+- **Fond studio et ombre (gratuit, hors ligne)** : « Studio dégradé » donne un fond de la couleur
+  choisie, plus clair au centre et qui s'assombrit doucement vers le bas et les bords. Le curseur
+  « Ombre sous le produit » ajoute une ombre de contact et une ombre portée douce, calculées à
+  partir du détourage (fonctionne avec tous les fonds).
+- **Nouveau fond créé par l'IA** : case « Fond créé par l'IA OpenAI (payant) » et une
   description (ex. « table en marbre blanc, lumière douce »). Le produit détouré est conservé à
   l'identique. Cumulable avec le recadrage sur le sujet et l'agrandissement par IA.
 - **Changer le ratio en ajoutant du fond** : l'image entière est conservée et la toile est agrandie

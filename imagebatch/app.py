@@ -548,6 +548,7 @@ class MainWindow(QMainWindow):
         f.addRow("Modèle", self.bg_model)
         self.bg_fill = QComboBox()
         for label, key in [("Transparent", "transparent"), ("Couleur unie", "color"),
+                           ("Studio dégradé (gratuit)", "studio"),
                            ("Image…", "image"), ("Original flouté", "blur")]:
             self.bg_fill.addItem(label, key)
         self.bg_fill.currentIndexChanged.connect(self._update_bg_ui)
@@ -576,6 +577,13 @@ class MainWindow(QMainWindow):
         self.bg_feather.setValue(1)
         self.bg_feather.valueChanged.connect(self.refresh_preview)
         f.addRow("Adoucir le contour", self.bg_feather)
+        self.bg_shadow = QSlider(Qt.Horizontal)
+        self.bg_shadow.setRange(0, 100)
+        self.bg_shadow.setValue(0)
+        self.bg_shadow.setToolTip("Ombre sous le produit, calculée à partir du détourage (0 = aucune). Gratuit, hors ligne.")
+        self.bg_shadow.valueChanged.connect(self.refresh_preview)
+        self.bg_shadow_label = QLabel("Ombre sous le produit")
+        f.addRow(self.bg_shadow_label, self.bg_shadow)
         trim_row = QHBoxLayout()
         self.bg_trim = QCheckBox("Recadrer sur le sujet, marge")
         self.bg_trim.toggled.connect(self.refresh_preview)
@@ -585,7 +593,7 @@ class MainWindow(QMainWindow):
         trim_row.addWidget(self.bg_trim)
         trim_row.addWidget(self.bg_margin)
         f.addRow(trim_row)
-        self.bg_ai_cb = QCheckBox("Créer le nouveau fond avec l'IA (OpenAI)")
+        self.bg_ai_cb = QCheckBox("Fond créé par l'IA OpenAI (payant)")
         self.bg_ai_cb.toggled.connect(self._update_bg_ui)
         f.addRow(self.bg_ai_cb)
         self.bg_prompt = QLineEdit(self.qsettings.value("bg_prompt", ""))
@@ -598,7 +606,7 @@ class MainWindow(QMainWindow):
         self.bg_status.setWordWrap(True)
         f.addRow(self.bg_status)
         self.bg_widgets = [self.bg_model, self.bg_fill, self.bg_color_btn, self.bg_color_hex, self.bg_image_btn,
-                           self.bg_feather, self.bg_trim, self.bg_margin, self.bg_ai_cb, self.bg_prompt]
+                           self.bg_feather, self.bg_shadow, self.bg_trim, self.bg_margin, self.bg_ai_cb, self.bg_prompt]
         v.addWidget(g)
 
         # Changement de ratio avec ajout de fond
@@ -715,7 +723,7 @@ class MainWindow(QMainWindow):
         for label, key in [("Haute", "high"), ("Moyenne (moins chère)", "medium"), ("Basse", "low")]:
             self.openai_quality.addItem(label, key)
         f.addRow("Qualité", self.openai_quality)
-        note = QLabel("Utilisée par « Créer le nouveau fond avec l'IA » et « Agrandir avec l'IA OpenAI ». "
+        note = QLabel("Utilisée par « Fond créé par l'IA OpenAI » et « Agrandir avec l'IA OpenAI ». "
                       "Les images concernées sont envoyées à OpenAI (≈ 0,05 à 0,20 € par appel).")
         note.setWordWrap(True)
         f.addRow(note)
@@ -964,6 +972,7 @@ class MainWindow(QMainWindow):
             bg_color=(self.bg_color.red(), self.bg_color.green(), self.bg_color.blue()),
             bg_image=self.bg_image_path,
             bg_feather=self.bg_feather.value(),
+            bg_shadow=self.bg_shadow.value(),
             bg_trim=self.bg_trim.isChecked(),
             bg_margin=self.bg_margin.value(),
             bg_ai=self.bg_ai_cb.isChecked(),
@@ -1022,8 +1031,9 @@ class MainWindow(QMainWindow):
         fill = self.bg_fill.currentData()
         bg_ai = self.bg_ai_cb.isChecked()
         self.bg_fill.setEnabled(on and not err and not bg_ai)  # l'IA remplace le choix de fond
-        for wdg, vis in [(self.bg_color_box, fill == "color" and not bg_ai),
-                         (self.bg_color_label, fill == "color" and not bg_ai),
+        for wdg, vis in [(self.bg_color_box, fill in ("color", "studio") and not bg_ai),
+                         (self.bg_color_label, fill in ("color", "studio") and not bg_ai),
+                         (self.bg_shadow, not bg_ai), (self.bg_shadow_label, not bg_ai),
                          (self.bg_image_btn, fill == "image" and not bg_ai),
                          (self.bg_image_label, fill == "image" and not bg_ai),
                          (self.bg_prompt, bg_ai), (self.bg_prompt_label, bg_ai)]:

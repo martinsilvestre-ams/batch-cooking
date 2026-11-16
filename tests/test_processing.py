@@ -247,3 +247,17 @@ def test_retouch_removes_mark_in_selected_zone(monkeypatch):
     out = np.asarray(P.process(img, s), np.int16)
     assert np.abs(out[100:110, 100:120] - 128).max() < 10
     assert (out[:50] == 128).all()
+
+
+def test_studio_background_with_shadow():
+    import numpy as np
+    from PIL import ImageDraw
+
+    img = Image.new("RGB", (400, 400), (0, 200, 0))
+    mask = Image.new("L", (400, 400), 0)
+    ImageDraw.Draw(mask).rectangle((150, 100, 250, 300), fill=255)
+    s = P.Settings(bg_enabled=True, bg_fill="studio", bg_color=(230, 230, 230), bg_shadow=80)
+    out = np.asarray(P.process(img, s, mask_fn=lambda im: mask), np.int16)
+    assert out.shape == (400, 400, 3)
+    assert out[:, :, 1].max() <= 255 and abs(int(out[50, 200, 1]) - int(out[50, 200, 0])) < 6  # plus de vert
+    assert out[305, 200].mean() < out[305, 20].mean() - 15  # ombre sous le produit
