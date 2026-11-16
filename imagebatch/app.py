@@ -96,6 +96,23 @@ class Section(QWidget):
 # --------------------------------------------------------------------------- #
 # Aperçu avec zone de recadrage interactive
 # --------------------------------------------------------------------------- #
+def parse_color(text: str) -> QColor | None:
+    """« #F2F2F2 », « F2F2F2 », « #FFF » ou « 242, 242, 242 » -> QColor (None si invalide)."""
+    import re
+
+    t = text.strip()
+    nums = re.findall(r"\d+", t)
+    if re.fullmatch(r"(rgb\s*\()?\s*\d+\s*[,; ]\s*\d+\s*[,; ]\s*\d+\s*\)?", t, re.I) and \
+            all(int(n) <= 255 for n in nums):
+        return QColor(*(int(n) for n in nums[:3]))
+    h = t.lstrip("#")
+    if re.fullmatch(r"[0-9a-fA-F]{3}|[0-9a-fA-F]{6}", h):
+        if len(h) == 3:
+            h = "".join(ch * 2 for ch in h)
+        return QColor("#" + h)
+    return None
+
+
 class PreviewWidget(QWidget):
     cropChanged = Signal(tuple)
     retouchDrawn = Signal(tuple)  # zone (x, y, l, h) relative à l'image affichée
@@ -502,7 +519,16 @@ class MainWindow(QMainWindow):
         self.bg_color_btn = QPushButton()
         self.bg_color_btn.clicked.connect(self._choose_bg_color)
         self.bg_color_label = QLabel("Couleur")
-        f.addRow(self.bg_color_label, self.bg_color_btn)
+        self.bg_color_hex = QLineEdit()
+        self.bg_color_hex.setPlaceholderText("#FFFFFF ou 255,255,255")
+        self.bg_color_hex.setToolTip("Tapez un code couleur : #RRGGBB, RRGGBB, #RGB ou R,V,B, puis Entrée")
+        self.bg_color_hex.editingFinished.connect(lambda: self._typed_color("bg"))
+        self.bg_color_box = QWidget()
+        hb = QHBoxLayout(self.bg_color_box)
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.addWidget(self.bg_color_btn, 1)
+        hb.addWidget(self.bg_color_hex, 1)
+        f.addRow(self.bg_color_label, self.bg_color_box)
         self.bg_image_btn = QPushButton("Choisir une image de fond…")
         self.bg_image_btn.clicked.connect(self._choose_bg_image)
         self.bg_image_path = ""
@@ -534,7 +560,7 @@ class MainWindow(QMainWindow):
         self.bg_status = QLabel("")
         self.bg_status.setWordWrap(True)
         f.addRow(self.bg_status)
-        self.bg_widgets = [self.bg_model, self.bg_fill, self.bg_color_btn, self.bg_image_btn,
+        self.bg_widgets = [self.bg_model, self.bg_fill, self.bg_color_btn, self.bg_color_hex, self.bg_image_btn,
                            self.bg_feather, self.bg_trim, self.bg_margin, self.bg_ai_cb, self.bg_prompt]
         v.addWidget(g)
 
@@ -582,7 +608,16 @@ class MainWindow(QMainWindow):
         self.pad_color_btn = QPushButton()
         self.pad_color_btn.clicked.connect(self._choose_pad_color)
         self.pad_color_label = QLabel("Couleur")
-        f.addRow(self.pad_color_label, self.pad_color_btn)
+        self.pad_color_hex = QLineEdit()
+        self.pad_color_hex.setPlaceholderText("#FFFFFF ou 255,255,255")
+        self.pad_color_hex.setToolTip("Tapez un code couleur : #RRGGBB, RRGGBB, #RGB ou R,V,B, puis Entrée")
+        self.pad_color_hex.editingFinished.connect(lambda: self._typed_color("pad"))
+        self.pad_color_box = QWidget()
+        hb = QHBoxLayout(self.pad_color_box)
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.addWidget(self.pad_color_btn, 1)
+        hb.addWidget(self.pad_color_hex, 1)
+        f.addRow(self.pad_color_label, self.pad_color_box)
         self.pad_blur = QSlider(Qt.Horizontal)
         self.pad_blur.setRange(5, 120)
         self.pad_blur.setValue(40)
@@ -596,7 +631,7 @@ class MainWindow(QMainWindow):
         f.addRow(self.ai_local_cb)
         f.addRow(self.ai_openai_cb)
         self.pad_widgets = [self.pad_ratio, self.pad_fill, self.pad_position, self.pad_position_img,
-                            self.clear_overrides_btn, self.pad_color_btn, self.pad_blur,
+                            self.clear_overrides_btn, self.pad_color_btn, self.pad_color_hex, self.pad_blur,
                             self.ai_local_cb, self.ai_openai_cb]
         v.addWidget(g)
 
@@ -916,13 +951,15 @@ class MainWindow(QMainWindow):
         fill = self.bg_fill.currentData()
         bg_ai = self.bg_ai_cb.isChecked()
         self.bg_fill.setEnabled(on and not err and not bg_ai)  # l'IA remplace le choix de fond
-        for wdg, vis in [(self.bg_color_btn, fill == "color" and not bg_ai),
+        for wdg, vis in [(self.bg_color_box, fill == "color" and not bg_ai),
                          (self.bg_color_label, fill == "color" and not bg_ai),
                          (self.bg_image_btn, fill == "image" and not bg_ai),
                          (self.bg_image_label, fill == "image" and not bg_ai),
                          (self.bg_prompt, bg_ai), (self.bg_prompt_label, bg_ai)]:
             wdg.setVisible(vis)
         self.bg_color_btn.setText(self.bg_color.name().upper())
+        if not self.bg_color_hex.hasFocus():
+            self.bg_color_hex.setText(self.bg_color.name().upper())
         self.bg_color_btn.setStyleSheet(
             f"background:{self.bg_color.name()}; color:{'#000' if self.bg_color.lightness() > 128 else '#fff'};")
         if err:
@@ -1073,7 +1110,7 @@ class MainWindow(QMainWindow):
         for w in self.pad_widgets:
             w.setEnabled(on)
         fill = self.pad_fill.currentData()
-        self.pad_color_btn.setVisible(fill == "color")
+        self.pad_color_box.setVisible(fill == "color")
         self.pad_color_label.setVisible(fill == "color")
         self.pad_blur.setVisible(fill == "blur")
         self.pad_blur_label.setVisible(fill == "blur")
@@ -1082,9 +1119,22 @@ class MainWindow(QMainWindow):
         self.pad_fill.setEnabled(on and not is_ai)  # l'IA remplace le choix de fond
         self._update_ai_bar()
         self.pad_color_btn.setText(self.pad_color.name().upper())
+        if not self.pad_color_hex.hasFocus():
+            self.pad_color_hex.setText(self.pad_color.name().upper())
         self.pad_color_btn.setStyleSheet(
             f"background:{self.pad_color.name()}; color:{'#000' if self.pad_color.lightness() > 128 else '#fff'};")
         self.refresh_preview()
+
+    def _typed_color(self, which: str):
+        field = getattr(self, f"{which}_color_hex")
+        c = parse_color(field.text())
+        if c is None:
+            field.setText(getattr(self, f"{which}_color").name().upper())  # code invalide : on revient
+            self.statusBar().showMessage("Code couleur non reconnu (ex. #F2F2F2 ou 242,242,242)", 4000)
+            return
+        setattr(self, f"{which}_color", c)
+        field.setText(c.name().upper())
+        (self._update_bg_ui if which == "bg" else self._update_pad_ui)()
 
     def _choose_pad_color(self):
         c = QColorDialog.getColor(self.pad_color, self, "Couleur du fond")
