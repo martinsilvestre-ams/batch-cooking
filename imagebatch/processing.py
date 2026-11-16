@@ -64,6 +64,10 @@ class Settings:
     bg_ai: bool = False  # nouveau fond généré par l'IA OpenAI
     bg_prompt: str = ""  # description du nouveau fond
     bg_shadow: int = 0  # ombre sous le produit, 0 (aucune) à 100
+    bg_shadow_mode: str = "contact"  # "contact" (sous le produit) | "sun" (ombre portée par un soleil)
+    sun_x: float = -0.5  # position du soleil (-1..1, centre = au-dessus du produit)
+    sun_y: float = -0.5
+    sun_blur: int = 50  # douceur de l'ombre portée (0..100)
 
     # Changement de ratio en ajoutant du fond (sans recadrer)
     pad_enabled: bool = False
@@ -398,7 +402,9 @@ def _replace_background(img: Image.Image, mask: Image.Image, s: Settings) -> Ima
     else:
         canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
-    if s.bg_shadow > 0:
+    if s.bg_shadow > 0 and s.bg_shadow_mode == "sun":
+        canvas = _add_sun_shadow(canvas, mask, s.bg_shadow / 100, s.sun_x, s.sun_y, s.sun_blur / 100)
+    elif s.bg_shadow > 0:
         canvas = _add_shadow(canvas, mask, s.bg_shadow / 100)
     subject = src.copy()
     subject.putalpha(mask)
@@ -422,6 +428,51 @@ def studio_background(size: tuple[int, int], color: tuple[int, int, int]) -> Ima
     out = np.asarray(small.resize((w, h), Image.BICUBIC), np.float32)
     out += np.random.default_rng(0).normal(0, 1.2, (h, w, 1)).astype(np.float32)  # évite les bandes
     return Image.fromarray(out.clip(0, 255).round().astype(np.uint8))
+
+
+def _add_sun_shadow(canvas: Image.Image, mask: Image.Image, strength: float,
+                    sun_x: float, sun_y: float, softness: float) -> Image.Image:
+    """Ombre portée « naturelle » : la silhouette projetée à l'opposé du soleil.
+
+    sun_x / sun_y : position du soleil (-1..1) ; plus il est loin du centre (soleil bas),
+    plus l'ombre est longue. L'ombre est nette près du produit et devient plus floue
+    et plus claire en s'éloignant, comme une vraie ombre."""
+    import math
+
+    w, h = canvas.size
+    dist = min(1.0, math.hypot(sun_x, sun_y))
+    if dist < 0.02:
+        return _add_shadow(canvas, mask, strength)
+    # travail à basse résolution (ombre = basses fréquences), puis agrandissement
+    f = min(1.0, 700 / max(w, h))
+    sw, sh = max(1, round(w * f)), max(1, round(h * f))
+    m = mask.resize((sw, sh), Image.BILINEAR).point(lambda v: 255 if v > 100 else 0)
+    box = m.getbbox()
+    if not box:
+        return canvas
+    size = max(box[2] - box[0], box[3] - box[1])
+    dx, dy = -sun_x / dist, -sun_y / dist  # l'ombre part à l'opposé du soleil
+    length = size * (0.04 + 0.9 * dist ** 1.6)
+    steps = max(4, min(400, int(length / 1.5)))  # pas fins : pas d'escalier
+    acc = Image.new("L", (sw, sh), 0)
+    for i in range(steps + 1):
+        t = i / steps
+        k = (1 - t) ** 1.2 * 0.8 + 0.2 * (1 - t)  # de plus en plus claire en s'éloignant
+        layer = Image.new("L", (sw, sh), 0)
+        layer.paste(m.point(lambda v, k=k: int(v * k)), (round(dx * length * t), round(dy * length * t)))
+        acc = ImageChops.lighter(acc, layer)
+    # flou progressif : net près du produit (valeurs fortes), flou au loin (valeurs faibles)
+    near = acc.filter(ImageFilter.GaussianBlur(1 + softness * size * 0.01))
+    far = acc.filter(ImageFilter.GaussianBlur(2 + softness * size * 0.08))
+    acc = Image.composite(near, far, near)
+    alpha = acc.resize((w, h), Image.BICUBIC).point(lambda v: int(v * min(1.0, strength) * 0.75))
+    # ombre légèrement teintée (plus naturelle qu'un noir pur)
+    tint = canvas.convert("RGB").resize((1, 1), Image.BOX).getpixel((0, 0))
+    dark = Image.new("RGBA", (w, h), tuple(int(c * 0.25) for c in tint) + (0,))
+    dark.putalpha(alpha)
+    out = canvas.copy()
+    out.alpha_composite(dark)
+    return out
 
 
 def _add_shadow(canvas: Image.Image, mask: Image.Image, strength: float) -> Image.Image:

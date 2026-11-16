@@ -42,6 +42,9 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
   choisie, plus clair au centre et qui s'assombrit doucement vers le bas et les bords. Le curseur
   « Ombre sous le produit » ajoute une ombre de contact et une ombre portée douce, calculées à
   partir du détourage (fonctionne avec tous les fonds).
+  Type d'ombre « Soleil » : placez le petit soleil dans le disque, l'ombre portée part à l'opposé ;
+  plus le soleil est près du bord, plus l'ombre est longue. Elle est nette près du produit et se
+  floute en s'éloignant (« Douceur de l'ombre »). Même réglage pour tout le lot.
 - **Nouveau fond créé par l'IA** : case « Fond créé par l'IA OpenAI (payant) » et une
   description (ex. « table en marbre blanc, lumière douce »). Le produit détouré est conservé à
   l'identique. Cumulable avec le recadrage sur le sujet et l'agrandissement par IA.

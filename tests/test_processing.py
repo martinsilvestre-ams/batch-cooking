@@ -261,3 +261,16 @@ def test_studio_background_with_shadow():
     assert out.shape == (400, 400, 3)
     assert out[:, :, 1].max() <= 255 and abs(int(out[50, 200, 1]) - int(out[50, 200, 0])) < 6  # plus de vert
     assert out[305, 200].mean() < out[305, 20].mean() - 15  # ombre sous le produit
+
+
+def test_sun_shadow_falls_opposite_the_sun():
+    import numpy as np
+    from PIL import ImageDraw
+
+    img = Image.new("RGB", (400, 400), (240, 240, 240))
+    mask = Image.new("L", (400, 400), 0)
+    ImageDraw.Draw(mask).rectangle((150, 150, 250, 250), fill=255)
+    s = P.Settings(bg_enabled=True, bg_fill="color", bg_color=(240, 240, 240), bg_shadow=80,
+                   bg_shadow_mode="sun", sun_x=-0.8, sun_y=-0.6)  # soleil en haut à gauche
+    out = np.asarray(P.process(img, s, mask_fn=lambda im: mask), np.int16).mean(axis=2)
+    assert out[280, 280] < out[120, 120] - 20  # ombre en bas à droite, rien en haut à gauche

@@ -96,6 +96,67 @@ class Section(QWidget):
 # --------------------------------------------------------------------------- #
 # Aperçu avec zone de recadrage interactive
 # --------------------------------------------------------------------------- #
+class SunPad(QWidget):
+    """Petit disque où l'on place le soleil : l'ombre part du côté opposé,
+    et plus le soleil est près du bord (soleil bas), plus l'ombre est longue."""
+    moved = Signal(float, float)
+
+    def __init__(self, x=-0.5, y=-0.5):
+        super().__init__()
+        self.x, self.y = x, y
+        self.setFixedSize(130, 130)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Déplacez le soleil : l'ombre part à l'opposé.\n"
+                        "Près du centre = soleil haut, ombre courte ; près du bord = soleil bas, ombre longue.")
+
+    def _center(self):
+        return self.width() / 2, self.height() / 2, self.width() / 2 - 12
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        cx, cy, r = self._center()
+        p.setPen(QPen(QColor(120, 120, 120), 1))
+        p.setBrush(QColor(60, 60, 64))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        p.setPen(QPen(QColor(90, 90, 95), 1, Qt.DashLine))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPointF(cx, cy), r / 2, r / 2)
+        # produit au centre et direction de l'ombre
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(200, 200, 200))
+        p.drawRect(QRectF(cx - 7, cy - 7, 14, 14))
+        p.setPen(QPen(QColor(20, 20, 20, 200), 4, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx, cy), QPointF(cx - self.x * r * 0.9, cy - self.y * r * 0.9))
+        sx, sy = cx + self.x * r, cy + self.y * r
+        p.setPen(QPen(QColor(255, 200, 60), 2))
+        for i in range(8):
+            import math
+            a = i * math.pi / 4
+            p.drawLine(QPointF(sx + 9 * math.cos(a), sy + 9 * math.sin(a)),
+                       QPointF(sx + 13 * math.cos(a), sy + 13 * math.sin(a)))
+        p.setBrush(QColor(255, 200, 60))
+        p.drawEllipse(QPointF(sx, sy), 6, 6)
+
+    def _set(self, pos):
+        import math
+        cx, cy, r = self._center()
+        x, y = (pos.x() - cx) / r, (pos.y() - cy) / r
+        d = math.hypot(x, y)
+        if d > 1:
+            x, y = x / d, y / d
+        self.x, self.y = round(x, 3), round(y, 3)
+        self.update()
+        self.moved.emit(self.x, self.y)
+
+    def mousePressEvent(self, e):
+        self._set(e.position())
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & Qt.LeftButton:
+            self._set(e.position())
+
+
 def parse_color(text: str) -> QColor | None:
     """« #F2F2F2 », « F2F2F2 », « #FFF » ou « 242, 242, 242 » -> QColor (None si invalide)."""
     import re
@@ -582,8 +643,26 @@ class MainWindow(QMainWindow):
         self.bg_shadow.setValue(0)
         self.bg_shadow.setToolTip("Ombre sous le produit, calculée à partir du détourage (0 = aucune). Gratuit, hors ligne.")
         self.bg_shadow.valueChanged.connect(self.refresh_preview)
-        self.bg_shadow_label = QLabel("Ombre sous le produit")
+        self.bg_shadow_label = QLabel("Ombre (intensité)")
         f.addRow(self.bg_shadow_label, self.bg_shadow)
+        self.bg_shadow_mode = QComboBox()
+        self.bg_shadow_mode.addItem("Sous le produit (contact)", "contact")
+        self.bg_shadow_mode.addItem("Soleil : ombre portée longue", "sun")
+        self.bg_shadow_mode.currentIndexChanged.connect(self._update_bg_ui)
+        self.bg_shadow_mode.currentIndexChanged.connect(
+            lambda: self.bg_shadow.setValue(60) if self.bg_shadow.value() == 0 else None)
+        self.bg_shadow_mode_label = QLabel("Type d'ombre")
+        f.addRow(self.bg_shadow_mode_label, self.bg_shadow_mode)
+        self.sun_pad = SunPad()
+        self.sun_pad.moved.connect(lambda *_: self.refresh_preview())
+        self.sun_label = QLabel("Soleil")
+        f.addRow(self.sun_label, self.sun_pad)
+        self.sun_blur = QSlider(Qt.Horizontal)
+        self.sun_blur.setRange(0, 100)
+        self.sun_blur.setValue(50)
+        self.sun_blur.valueChanged.connect(self.refresh_preview)
+        self.sun_blur_label = QLabel("Douceur de l'ombre")
+        f.addRow(self.sun_blur_label, self.sun_blur)
         trim_row = QHBoxLayout()
         self.bg_trim = QCheckBox("Recadrer sur le sujet, marge")
         self.bg_trim.toggled.connect(self.refresh_preview)
@@ -606,7 +685,8 @@ class MainWindow(QMainWindow):
         self.bg_status.setWordWrap(True)
         f.addRow(self.bg_status)
         self.bg_widgets = [self.bg_model, self.bg_fill, self.bg_color_btn, self.bg_color_hex, self.bg_image_btn,
-                           self.bg_feather, self.bg_shadow, self.bg_trim, self.bg_margin, self.bg_ai_cb, self.bg_prompt]
+                           self.bg_feather, self.bg_shadow, self.bg_shadow_mode,
+                           self.sun_pad, self.sun_blur, self.bg_trim, self.bg_margin, self.bg_ai_cb, self.bg_prompt]
         v.addWidget(g)
 
         # Changement de ratio avec ajout de fond
@@ -973,6 +1053,9 @@ class MainWindow(QMainWindow):
             bg_image=self.bg_image_path,
             bg_feather=self.bg_feather.value(),
             bg_shadow=self.bg_shadow.value(),
+            bg_shadow_mode=self.bg_shadow_mode.currentData(),
+            sun_x=self.sun_pad.x, sun_y=self.sun_pad.y,
+            sun_blur=self.sun_blur.value(),
             bg_trim=self.bg_trim.isChecked(),
             bg_margin=self.bg_margin.value(),
             bg_ai=self.bg_ai_cb.isChecked(),
@@ -1030,10 +1113,14 @@ class MainWindow(QMainWindow):
             w.setEnabled(on and not err)
         fill = self.bg_fill.currentData()
         bg_ai = self.bg_ai_cb.isChecked()
+        sun = not bg_ai and self.bg_shadow_mode.currentData() == "sun"
         self.bg_fill.setEnabled(on and not err and not bg_ai)  # l'IA remplace le choix de fond
         for wdg, vis in [(self.bg_color_box, fill in ("color", "studio") and not bg_ai),
                          (self.bg_color_label, fill in ("color", "studio") and not bg_ai),
                          (self.bg_shadow, not bg_ai), (self.bg_shadow_label, not bg_ai),
+                         (self.bg_shadow_mode, not bg_ai), (self.bg_shadow_mode_label, not bg_ai),
+                         (self.sun_pad, sun), (self.sun_label, sun),
+                         (self.sun_blur, sun), (self.sun_blur_label, sun),
                          (self.bg_image_btn, fill == "image" and not bg_ai),
                          (self.bg_image_label, fill == "image" and not bg_ai),
                          (self.bg_prompt, bg_ai), (self.bg_prompt_label, bg_ai)]:
