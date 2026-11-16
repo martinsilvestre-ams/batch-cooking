@@ -58,6 +58,10 @@ Au premier lancement, macOS peut bloquer l'app (non signée) : clic droit sur l'
   Si la détection se trompe sur une image, choisissez « Pour cette image » (haut, bas, centré…) :
   ce réglage ne concerne que l'image sélectionnée (ou les images sélectionnées), marquée ✎ dans
   la liste, et prend le pas sur le réglage du lot à l'export.
+- **Retouche IA d'une zone** : ouvrez le volet, cliquez « Sélectionner une zone sur l'aperçu »
+  et tracez un rectangle sur la trace à gommer. L'IA (locale, ou OpenAI avec votre clé) la
+  regénère pour cette image seulement (marquée ✎), à l'aperçu et à l'export. « Annuler la
+  dernière zone » et « Tout effacer » pour revenir en arrière.
 - **Redimensionnement** : largeur fixe, hauteur fixe, tenir dans un cadre, dimensions exactes,
   pourcentage, avec option « ne jamais agrandir ».
 - **Retouches** : rotation, miroirs, luminosité, contraste, saturation, netteté, noir et blanc.

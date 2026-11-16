@@ -471,3 +471,78 @@ def outpaint(img: Image.Image, size: tuple[int, int], ox: int, oy: int, engine: 
     if engine == "openai":
         return outpaint_openai(img, size, ox, oy, api_key, model, quality)
     return outpaint_local(img, size, ox, oy)
+
+
+# --------------------------------------------------------------------------- #
+# Retouche d'une zone (gommer une trace, un défaut…)
+# --------------------------------------------------------------------------- #
+RETOUCH_PROMPT = ("Remove any mark, stain, seam, artifact or object in the transparent area and fill it so it "
+                  "blends seamlessly with the surrounding photo (same surface, texture, lighting). Do not add "
+                  "anything new.")
+
+
+def _retouch_window(img_size, box, min_side=64):
+    """Zone de travail carrée autour de la sélection (avec du contexte)."""
+    w, h = img_size
+    x0, y0, x1, y1 = box
+    bw, bh = x1 - x0, y1 - y0
+    side = int(min(max(w, h), max(min_side, bw * 2.2, bh * 2.2)))
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    wx0 = int(min(max(0, cx - side / 2), max(0, w - side)))
+    wy0 = int(min(max(0, cy - side / 2), max(0, h - side)))
+    return wx0, wy0, min(w, wx0 + side), min(h, wy0 + side)
+
+
+def retouch(img: Image.Image, rects, engine: str = "local", api_key: str = "",
+            model: str = "gpt-image-1", quality: str = "high", prompt: str = "") -> Image.Image:
+    """Regénère par IA les zones sélectionnées. rects : (x, y, l, h) relatifs (0..1)."""
+    import numpy as np
+
+    has_alpha = img.mode in ("RGBA", "LA")
+    alpha = img.getchannel("A") if has_alpha else None
+    out = img.convert("RGB")
+    w, h = out.size
+    for (rx, ry, rw, rh) in rects:
+        box = (max(0, int(rx * w)), max(0, int(ry * h)),
+               min(w, int(np.ceil((rx + rw) * w))), min(h, int(np.ceil((ry + rh) * h))))
+        if box[2] - box[0] < 2 or box[3] - box[1] < 2:
+            continue
+        win = _retouch_window((w, h), box)
+        tile = out.crop(win)
+        tw, th = tile.size
+        lb = (box[0] - win[0], box[1] - win[1], box[2] - win[0], box[3] - win[1])
+        if engine == "openai":
+            size = OPENAI_SIZES[0]
+            scale = min(size[0] / tw, size[1] / th)
+            sw, sh = max(1, round(tw * scale)), max(1, round(th * scale))
+            base = Image.new("RGB", size)
+            base.paste(tile.resize((sw, sh), Image.LANCZOS))
+            m = Image.new("RGBA", size, (0, 0, 0, 255))
+            m.paste((0, 0, 0, 0), tuple(round(v * scale) for v in lb))  # transparent = à refaire
+            res = _openai_edit(base, m, (prompt.strip() + ". " if prompt.strip() else "") + RETOUCH_PROMPT,
+                               api_key, model, quality)
+            filled = res.crop((0, 0, sw, sh)).resize((tw, th), Image.LANCZOS)
+        else:
+            mask = Image.new("L", (tw, th), 0)
+            mask.paste(255, lb)
+            # sélection légèrement élargie : la trace ne doit pas déborder
+            grow = max(2, round(max(tw, th) / 128))
+            mask = mask.filter(ImageFilter.MaxFilter(2 * (grow // 2) + 1))
+            src = tile.filter(ImageFilter.MedianFilter(3))
+            filled = _lama(src, mask)
+            g = _noise_sigma(np.asarray(tile, np.float32))
+            if g > 0.3:
+                n = _grain((th, tw), g, 0)
+                filled = Image.fromarray((np.asarray(filled, np.float32) + n[:, :, None])
+                                         .clip(0, 255).round().astype(np.uint8))
+        # on ne remplace que la sélection, avec un bord adouci
+        f = max(2, round(min(lb[2] - lb[0], lb[3] - lb[1]) * 0.08))
+        soft = Image.new("L", (tw, th), 0)
+        soft.paste(255, (max(0, lb[0] - f), max(0, lb[1] - f), min(tw, lb[2] + f), min(th, lb[3] + f)))
+        soft = soft.filter(ImageFilter.GaussianBlur(f / 2))
+        tile.paste(filled, (0, 0), soft)
+        out.paste(tile, win[:2])
+    if alpha is not None:
+        out = out.convert("RGBA")
+        out.putalpha(alpha)
+    return out

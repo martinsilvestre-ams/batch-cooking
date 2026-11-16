@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PIL import Image, ImageOps
-from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QThread, Signal
+from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QFormLayout,
@@ -98,6 +98,7 @@ class Section(QWidget):
 # --------------------------------------------------------------------------- #
 class PreviewWidget(QWidget):
     cropChanged = Signal(tuple)
+    retouchDrawn = Signal(tuple)  # zone (x, y, l, h) relative à l'image affichée
 
     def __init__(self):
         super().__init__()
@@ -109,6 +110,9 @@ class PreviewWidget(QWidget):
         self.ratio: float | None = None  # largeur/hauteur en pixels de l'image
         self._img_aspect = 1.0
         self._drag = None  # ("new"|"move", point de départ, rect de départ)
+        self.retouch_mode = False
+        self.retouch_rects: list = []
+        self._rdrag = None  # (point de départ, rect en cours)
         self.message = "Ajoutez des images (bouton ou glisser-déposer)"
 
     def set_image(self, pix: QPixmap | None, img_aspect: float = 1.0):
@@ -144,6 +148,14 @@ class PreviewWidget(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.drawPixmap(r, self._pix, QRectF(self._pix.rect()))
 
+        if self.retouch_rects or self._rdrag:
+            rects = list(self.retouch_rects) + ([self._rdrag[1]] if self._rdrag else [])
+            for i, (x, y, w, h) in enumerate(rects):
+                rr = QRectF(r.x() + x * r.width(), r.y() + y * r.height(), w * r.width(), h * r.height())
+                p.fillRect(rr, QColor(255, 140, 0, 50))
+                p.setPen(QPen(QColor(255, 140, 0), 2, Qt.DashLine))
+                p.drawRect(rr)
+
         if self.edit_crop:
             x, y, w, h = self.crop
             cr = QRectF(r.x() + x * r.width(), r.y() + y * r.height(), w * r.width(), h * r.height())
@@ -172,6 +184,10 @@ class PreviewWidget(QWidget):
         return x <= rx <= x + w and y <= ry <= y + h
 
     def mousePressEvent(self, e):
+        if self.retouch_mode and self._pix and e.button() == Qt.LeftButton:
+            rx, ry = self._rel(e.position())
+            self._rdrag = ((rx, ry), (rx, ry, 0.0, 0.0))
+            return
         if not (self.edit_crop and self._pix) or e.button() != Qt.LeftButton:
             return
         rx, ry = self._rel(e.position())
@@ -180,6 +196,14 @@ class PreviewWidget(QWidget):
         self._drag = (mode, (rx, ry), self.crop)
 
     def mouseMoveEvent(self, e):
+        if self.retouch_mode and self._pix:
+            self.setCursor(Qt.CrossCursor)
+            if self._rdrag:
+                (sx, sy), _ = self._rdrag
+                rx, ry = self._rel(e.position())
+                self._rdrag = ((sx, sy), (min(sx, rx), min(sy, ry), abs(rx - sx), abs(ry - sy)))
+                self.update()
+            return
         if self.edit_crop and self._pix and not self._drag:
             rx, ry = self._rel(e.position())
             full = self.crop == (0.0, 0.0, 1.0, 1.0)
@@ -213,6 +237,13 @@ class PreviewWidget(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, _e):
+        if self._rdrag:
+            rect = self._rdrag[1]
+            self._rdrag = None
+            if rect[2] > 0.005 and rect[3] > 0.005:
+                self.retouchDrawn.emit(rect)
+            self.update()
+            return
         if self._drag:
             self._drag = None
             x, y, w, h = self.crop
@@ -263,7 +294,8 @@ class AiPreviewThread(QThread):
 
     def run(self):
         try:
-            if self.s.pad_fill == "ai_local" and not OP.lama_ready():
+            if ((self.s.pad_enabled and self.s.pad_fill == "ai_local")
+                    or (self.s.retouch and self.s.retouch_engine == "local")) and not OP.lama_ready():
                 OP.lama_download(lambda d, t: self.status.emit(
                     f"Téléchargement de l'IA locale (une seule fois) {d * 100 // max(t, 1)} %…"))
             if self.s.bg_enabled and not BG.is_downloaded(self.s.bg_model):
@@ -294,7 +326,9 @@ class ExportThread(QThread):
             except Exception as exc:
                 self.done.emit(0, [f"Téléchargement du modèle impossible : {exc}"])
                 return
-        if self.settings.pad_enabled and self.settings.pad_fill == "ai_local" and not OP.lama_ready():
+        local_retouch = any(o.get("retouch") for o in self.overrides.values()) and self.settings.retouch_engine == "local"
+        if ((self.settings.pad_enabled and self.settings.pad_fill == "ai_local") or local_retouch) \
+                and not OP.lama_ready():
             try:
                 OP.lama_download(lambda d, t: self.progress.emit(0, f"IA locale ({d * 100 // max(t, 1)} %)"))
             except Exception as exc:
@@ -340,6 +374,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_file_panel())
         self.preview = PreviewWidget()
         self.preview.cropChanged.connect(self._on_crop_drawn)
+        self.preview.retouchDrawn.connect(self._on_retouch_drawn)
         center = QWidget()
         cl = QVBoxLayout(center)
         cl.setContentsMargins(0, 0, 0, 0)
@@ -565,6 +600,34 @@ class MainWindow(QMainWindow):
                             self.ai_local_cb, self.ai_openai_cb]
         v.addWidget(g)
 
+        # Retouche IA d'une zone, image par image
+        g = self.sec_retouch = Section("Retouche IA d'une zone")
+        f = QFormLayout(g.body)
+        f.setContentsMargins(8, 4, 4, 10)
+        self.retouch_btn = QPushButton("Sélectionner une zone sur l'aperçu")
+        self.retouch_btn.setCheckable(True)
+        self.retouch_btn.toggled.connect(self._on_retouch_mode)
+        f.addRow(self.retouch_btn)
+        self.retouch_engine = QComboBox()
+        self.retouch_engine.addItem("IA locale (gratuite, hors ligne)", "local")
+        self.retouch_engine.addItem("IA OpenAI (clé API, payant)", "openai")
+        self.retouch_engine.currentIndexChanged.connect(self.refresh_preview)
+        f.addRow("Moteur", self.retouch_engine)
+        row = QHBoxLayout()
+        self.retouch_undo = QPushButton("Annuler la dernière zone")
+        self.retouch_undo.clicked.connect(self._retouch_undo)
+        self.retouch_clear = QPushButton("Tout effacer")
+        self.retouch_clear.clicked.connect(self._retouch_clear)
+        row.addWidget(self.retouch_undo)
+        row.addWidget(self.retouch_clear)
+        f.addRow(row)
+        note = QLabel("Tracez un rectangle sur la trace à gommer : l'IA la regénère, pour cette image "
+                      "seulement (marquée ✎), à l'aperçu et à l'export. Faites les retouches en dernier : "
+                      "si vous changez le recadrage ou le ratio ensuite, les zones ne tombent plus au bon endroit.")
+        note.setWordWrap(True)
+        f.addRow(note)
+        v.addWidget(g)
+
         # Réglages OpenAI, communs au fond IA et à l'agrandissement IA
         g = self.sec_openai = Section("IA OpenAI (clé API)")
         f = QFormLayout(g.body)
@@ -721,12 +784,50 @@ class MainWindow(QMainWindow):
             if item is None:
                 continue
             key = item.data(Qt.UserRole)
-            if value is None:
-                self.overrides.pop(key, None)
-            else:
-                self.overrides[key] = {"pad_position": value}
+            self._set_override(key, "pad_position", value)
             self._mark_item(item)
         self.refresh_preview()
+
+    def _set_override(self, key: str, field: str, value):
+        o = self.overrides.setdefault(key, {})
+        if value is None or value == ():
+            o.pop(field, None)
+        else:
+            o[field] = value
+        if not o:
+            self.overrides.pop(key, None)
+
+    # ---------- retouche IA ----------
+    def _on_retouch_mode(self, on):
+        self.preview.retouch_mode = on
+        if on and self.compare.isChecked():
+            self.compare.setChecked(False)
+        self.retouch_btn.setText("Terminer la sélection" if on else "Sélectionner une zone sur l'aperçu")
+        if not on:
+            self.preview.setCursor(Qt.ArrowCursor)
+
+    def _retouches(self) -> tuple:
+        return tuple(self.overrides.get(str(self.preview_path), {}).get("retouch", ()))
+
+    def _set_retouches(self, rects: tuple):
+        if self.preview_path is None:
+            return
+        self._set_override(str(self.preview_path), "retouch", tuple(rects))
+        item = self.list.currentItem()
+        if item is not None:
+            self._mark_item(item)
+        self.refresh_preview()
+        if rects:
+            self._start_ai_preview()
+
+    def _on_retouch_drawn(self, rect):
+        self._set_retouches(self._retouches() + (tuple(round(v, 5) for v in rect),))
+
+    def _retouch_undo(self):
+        self._set_retouches(self._retouches()[:-1])
+
+    def _retouch_clear(self):
+        self._set_retouches(())
 
     def _mark_item(self, item):
         name = Path(item.data(Qt.UserRole)).name
@@ -768,6 +869,7 @@ class MainWindow(QMainWindow):
             pad_position=self.pad_position.currentData(),
             openai_key=self.openai_key.text().strip(),
             openai_quality=self.openai_quality.currentData(),
+            retouch_engine=self.retouch_engine.currentData() if hasattr(self, "retouch_engine") else "local",
             pad_color=(self.pad_color.red(), self.pad_color.green(), self.pad_color.blue()),
             pad_blur=self.pad_blur.value(),
             resize_mode=self.resize_mode.currentData(),
@@ -889,10 +991,12 @@ class MainWindow(QMainWindow):
         return (str(self.preview_path), repr(sorted(d.items())))
 
     def _ai_active(self, s: P.Settings) -> bool:
-        return (s.bg_enabled and s.bg_ai) or (s.pad_enabled and s.pad_fill in ("ai_local", "ai_openai"))
+        return ((s.bg_enabled and s.bg_ai) or (s.pad_enabled and s.pad_fill in ("ai_local", "ai_openai"))
+                or bool(s.retouch))
 
     def _uses_openai(self, s: P.Settings) -> bool:
-        return (s.bg_enabled and s.bg_ai) or (s.pad_enabled and s.pad_fill == "ai_openai")
+        return ((s.bg_enabled and s.bg_ai) or (s.pad_enabled and s.pad_fill == "ai_openai")
+                or (bool(s.retouch) and s.retouch_engine == "openai"))
 
     def _update_ai_bar(self):
         if not hasattr(self, "ai_preview_btn") or not hasattr(self, "openai_key"):
@@ -943,6 +1047,11 @@ class MainWindow(QMainWindow):
             self.ai_pending = None
         self.ai_preview_btn.setEnabled(True)
         self.ai_status.setText("Aperçu IA prêt.")
+        # une zone a été ajoutée pendant le calcul : on relance pour l'inclure
+        if self.preview_path is not None and self._retouches():
+            cur = self._ai_key(P.Settings(**{**self.settings_for(self.preview_path).__dict__, "resize_mode": "none"}))
+            if cur != key and cur not in self.ai_cache:
+                QTimer.singleShot(0, self._start_ai_preview)
         self.refresh_preview()
 
     def _on_ai_failed(self, key, msg):
@@ -1121,6 +1230,7 @@ class MainWindow(QMainWindow):
         self.sec_crop.set_active(s.crop_mode != "none")
         self.sec_bg.set_active(s.bg_enabled)
         self.sec_pad.set_active(s.pad_enabled)
+        self.sec_retouch.set_active(bool(s.retouch))
         self.sec_resize.set_active(s.resize_mode != "none")
         self.sec_edit.set_active(bool(s.rotate or s.flip_h or s.flip_v or s.grayscale) or any(
             abs(x - 1.0) > 1e-3 for x in (s.brightness, s.contrast, s.saturation, s.sharpness)))
@@ -1136,6 +1246,7 @@ class MainWindow(QMainWindow):
         if self.preview_src is None:
             self.preview.update()
             return
+        cached = None
         if self.compare.isChecked():
             img = self.preview_src
         elif manual:
@@ -1149,7 +1260,7 @@ class MainWindow(QMainWindow):
                 if mask_fn is None:  # masque pas encore prêt : aperçu sans détourage
                     preview_s.bg_enabled = False
             self.preview_info = {}
-            fallback = {"bg_ai": False}  # sans IA en attendant l'aperçu IA
+            fallback = {"bg_ai": False, "retouch": ()}  # sans IA en attendant l'aperçu IA
             if preview_s.pad_fill in ("ai_local", "ai_openai"):
                 fallback["pad_fill"] = "generated"
             img = P.process(self.preview_src, P.Settings(**{**preview_s.__dict__, **fallback}),
@@ -1157,6 +1268,8 @@ class MainWindow(QMainWindow):
             cached = self.ai_cache.get(self._ai_key(preview_s)) if self._ai_active(preview_s) else None
             if cached is not None:
                 img = cached  # aperçu IA déjà calculé pour ces réglages
+        retouched = not (self.compare.isChecked() or manual) and s.retouch
+        self.preview.retouch_rects = list(s.retouch) if retouched and cached is None else []
         self.preview.set_image(QPixmap.fromImage(pil_to_qimage(img)),
                                self.preview_src.width / self.preview_src.height)
         self.refresh_info()

@@ -233,3 +233,17 @@ def test_generated_fill_does_not_stretch_pixels():
     added = np.asarray(out, np.float32)[:60].mean(axis=2)
     assert added.mean(axis=0).std() < 3  # pas de colonnes recopiées
     assert np.allclose(np.asarray(out)[200:], a[100:])  # l'original est intact
+
+
+def test_retouch_removes_mark_in_selected_zone(monkeypatch):
+    # La zone sélectionnée est regénérée (IA simulée), le reste de l'image est intact.
+    import numpy as np
+    from imagebatch import outpaint as OP
+
+    monkeypatch.setattr(OP, "_lama", lambda tile, mask: Image.new("RGB", tile.size, (128, 128, 128)))
+    img = Image.new("RGB", (400, 300), (128, 128, 128))
+    img.paste((0, 0, 0), (100, 100, 120, 110))  # trace
+    s = P.Settings(retouch=((0.24, 0.32, 0.08, 0.06),))
+    out = np.asarray(P.process(img, s), np.int16)
+    assert np.abs(out[100:110, 100:120] - 128).max() < 10
+    assert (out[:50] == 128).all()

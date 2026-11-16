@@ -76,6 +76,9 @@ class Settings:
     openai_key: str = ""
     openai_model: str = "gpt-image-1"
     openai_quality: str = "high"  # "low" | "medium" | "high"
+    # retouches IA : zones (x, y, l, h) relatives à l'image après ajout du fond, avant redimensionnement
+    retouch: tuple = ()
+    retouch_engine: str = "local"  # "local" | "openai"
 
     # Redimensionnement : "none" | "width" | "height" | "fit" | "exact" | "percent"
     resize_mode: str = "none"
@@ -445,6 +448,9 @@ def process(img: Image.Image, s: Settings, mask_fn=None, info: Optional[dict] = 
         if s.bg_ai or s.bg_fill in ("color", "image", "blur"):
             img = img.convert("RGB")
     img = _pad(img, s, info, ai_fn)
+    if s.retouch:
+        from .outpaint import retouch
+        img = retouch(img, s.retouch, s.retouch_engine, s.openai_key, s.openai_model, s.openai_quality)
     img = _resize(img, s)
     return img
 
